@@ -1005,7 +1005,14 @@ function distribuirFicheirosDoGeral() {
     MailApp.sendEmail(EMAIL_NOTIFICACAO_DISTRIBUIDOR_GERAL, "Distribuição de ficheiros TENTADA ("+CODIGO_EMPRESA+")", summary);
 
   }  
-  
+
+
+  // Processar também os comprovativos em arquivo
+  try {
+    catalogarComprovativosArquivo();
+  } catch (e) {
+    Logger.log("ERRO no catalogador de comprovativos: " + e);
+  }
   
 }
 
@@ -2108,42 +2115,27 @@ function ocrPDF_(fileId) {
   throw lastErr || new Error('OCR falhou em todas as tentativas');
 }
 
+function _reconcileYearWithNearbyISO(line, matchIndex, dd, mm, windowChars) {
+  const around = windowChars || 60;
+  const left  = Math.max(0, matchIndex - around);
+  const right = Math.min(line.length, matchIndex + around);
+  const ctx = line.slice(left, right);
 
+  const iso = ctx.match(/\b(20\d{2})[\/\-\.](\d{1,2})[\/\-\.](\d{1,2})\b/);
+  if (!iso) return null;
+  
+  const isoY = iso[1];
+  const isoM = String(iso[2]).padStart(2,'0');
+  const isoD = String(iso[3]).padStart(2,'0');
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+  if ((dd === isoD && mm === isoM) || (dd === isoM && mm === isoD)) return isoY;
+  return null;
+}
 
 function extractDataDocumentoTaloes(pdfText) {
   if (!pdfText) return null;
 
-  // ===== Helpers =====
-  function _reconcileYearWithNearbyISO(line, matchIndex, dd, mm, windowChars) {
-    const around = windowChars || 60;
-    const left  = Math.max(0, matchIndex - around);
-    const right = Math.min(line.length, matchIndex + around);
-    const ctx = line.slice(left, right);
-    const iso = ctx.match(/\b(20\d{2})[\/\-\.](\d{1,2})[\/\-\.](\d{1,2})\b/);
-    if (!iso) return null;
-    const isoY = iso[1], isoM = String(iso[2]).padStart(2,'0'), isoD = String(iso[3]).padStart(2,'0');
-    if ((dd === isoD && mm === isoM) || (dd === isoM && mm === isoD)) return isoY;
-    return null;
-  }
+  // ===== Helpers =====  
   const injectSpaces = s => String(s)
     .replace(/\u00A0/g, ' ')
     .replace(/([A-Za-z])(\d)/g, '$1 $2')
@@ -2336,31 +2328,8 @@ function extractDataDocumentoTaloes(pdfText) {
   function _monEN_(s){ const m={january:1,february:2,march:3,april:4,may:5,june:6,july:7,august:8,september:9,october:10,november:11,december:12}; return m[String(s).toLowerCase()]||s; }
 }
 
-
-
 function extractDataDocumento_Simplesv1(pdfText) {
   if (!pdfText) return null;
-
-  //HELPER
-  function _reconcileYearWithNearbyISO(line, matchIndex, dd, mm, windowChars) {
-    const around = windowChars || 60;
-    const left  = Math.max(0, matchIndex - around);
-    const right = Math.min(line.length, matchIndex + around);
-    const ctx = line.slice(left, right);
-
-    const iso = ctx.match(/\b(20\d{2})[\/\-\.](\d{1,2})[\/\-\.](\d{1,2})\b/);
-    if (!iso) return null;
-
-    const isoY = iso[1];
-    const isoM = String(iso[2]).padStart(2,'0');
-    const isoD = String(iso[3]).padStart(2,'0');
-
-    // se coincide (ou OCR trocou D↔M), herda o ano do ISO
-    if ((dd === isoD && mm === isoM) || (dd === isoM && mm === isoD)) {
-      return isoY;
-    }
-    return null;
-  }
 
   // 0) Normalização leve
   const injectSpaces = s => String(s)
@@ -2961,14 +2930,16 @@ function _safeDatePERMISSIVA_(dd, mm, yyyy) {
  *
  * - percorre todos os PDFs na pasta de comprovativos (PASTA_COMPROVATIVOS_ID)
  * - extrai ATCUD e data de pagamento
- * - encontra o mês/ano onde está a fatura
+ * - encontra o mês/ano onde está a fatura (via procurarFaturaPorATCUDNoArquivo)
  * - cria uma CÓPIA renomeada para COMP<N>.pdf dentro de:
  *        #5 - Comprovativos de pagamento / PARA CATALOGAR
  * - move o ficheiro original para PASTA_LIXO
+ * - regista o movimento no mapa via copiarMoverELog_
  */
-function simularCatalogacaoComprovativosArquivo() {
+function catalogarComprovativosArquivo() {
   var pastaComprovativos = DriveApp.getFolderById(PASTA_COMPROVATIVOS_ID);
   var pdfFiles = getPDFFilesInFolder(pastaComprovativos);
+
   Logger.log("Encontrados " + pdfFiles.length + " comprovativos na pasta de entrada.");
 
   for (var i = 0; i < pdfFiles.length; i++) {
@@ -2988,7 +2959,12 @@ function simularCatalogacaoComprovativosArquivo() {
 
       var dataPagamentoStr = extractDateFromPayslip(texto);
       var anoPagamento = inferYearFromDateString(dataPagamentoStr);
-      if (!anoPagamento) anoPagamento = new Date().getFullYear();
+      if (!anoPagamento) {
+        anoPagamento = new Date().getFullYear();
+        Logger.log("  -> Data de pagamento não identificada. A assumir ano atual: " + anoPagamento);
+      } else {
+        Logger.log("  -> Data de pagamento lida: " + dataPagamentoStr + " (ano " + anoPagamento + ")");
+      }
 
       var match = procurarFaturaPorATCUDNoArquivo(atcud, anoPagamento);
 
@@ -3028,26 +3004,24 @@ function simularCatalogacaoComprovativosArquivo() {
           ? itPara.next()
           : pasta5.createFolder("PARA CATALOGAR");
 
-        // 4) Criar a cópia
-        var copia = file.makeCopy(novoNome, pastaParaCatalogar);
+        // 4) Criar a cópia + mover original para PASTA_LIXO + registar no mapa
+        var copia = copiarMoverELog_(file, pastaParaCatalogar, pastaComprovativos);
+        copia.setName(novoNome);
 
         Logger.log(
           "  -> Cópia criada: '" + copia.getName() +
-          "' em '#5 - Comprovativos de pagamento/ PARA CATALOGAR' de '" +
+          "' em '#5 - Comprovativos de pagamento / PARA CATALOGAR' de '" +
           pastaMes.getName() + "'."
         );
 
-        // 5) Mover o original para PASTA_LIXO
-        try {
-          var pastaLixo = DriveApp.getFolderById(PASTA_LIXO);
-          file.moveTo(pastaLixo);
-          Logger.log("  -> Ficheiro original movido para PASTA_LIXO.");
-        } catch (eLixo) {
-          Logger.log("  -> ERRO ao mover o original para PASTA_LIXO: " + eLixo);
-        }
-
       } else {
-        Logger.log("  -> NENHUM MATCH encontrado para ATCUD '" + atcud + "'.");
+        Logger.log(
+          "  -> NENHUM MATCH encontrado para ATCUD '" +
+          atcud +
+          "' (ano pagamento considerado: " +
+          anoPagamento +
+          ")."
+        );
       }
 
     } catch (e) {
@@ -3100,49 +3074,51 @@ function procurarFaturaPorATCUDNoArquivo(atcud, anoPagamento) {
   if (!atcud) return null;
 
   var atcudNormalizado = String(atcud).replace(/\s/g, "");
-  var yearFolders = getYearFolders(); // devolve array de pastas de ano (nomes "2023", "2024", ...)
+  
+  // getYearFolders retorna array de objetos: { year: number, folder: Folder }
+  var yearWrappers = getYearFolders(); 
 
-  if (!yearFolders || !yearFolders.length) return null;
+  if (!yearWrappers || !yearWrappers.length) return null;
 
-  // Construir lista de anos candidatos: pastas cujo ano <= anoPagamento
+  // 1. Construir lista de candidatos (filtrar pelo ano)
   var candidatos = [];
-  for (var i = 0; i < yearFolders.length; i++) {
-    var pastaAno = yearFolders[i];
-    var nomeAno = pastaAno.getName().trim();
-    var anoNum = parseInt(nomeAno, 10);
-
-    if (!isNaN(anoNum) && anoNum <= anoPagamento) {
-      candidatos.push(pastaAno);
+  
+  for (var i = 0; i < yearWrappers.length; i++) {
+    var wrapper = yearWrappers[i]; // É o objeto {year, folder}
+    
+    // Como getYearFolders já calculou o ano, usamos diretamente:
+    if (wrapper.year <= anoPagamento) {
+      candidatos.push(wrapper);
     }
   }
 
-  // Se não houver nenhuma <= anoPagamento, tentamos todos os anos disponíveis
+  // Se não houver nenhuma <= anoPagamento, tentamos todos (fallback)
   if (!candidatos.length) {
-    candidatos = yearFolders.slice();
+    candidatos = yearWrappers.slice();
   }
 
-  // Percorre anos candidatos (já vêm ordenados por getYearFolders)
+  // 2. Percorrer os candidatos
   for (var a = 0; a < candidatos.length; a++) {
-    var pastaAno = candidatos[a];
-    var anoStr = pastaAno.getName().trim();
-    var ano = parseInt(anoStr, 10);
-
-    if (isNaN(ano)) continue;
+    var wrapper = candidatos[a];
+    var ano = wrapper.year;
+    var pastaAno = wrapper.folder; // <--- AQUI ESTAVA O ERRO (precisamos da propriedade .folder)
 
     Logger.log("  -> A procurar ATCUD " + atcudNormalizado + " no ano " + ano + "...");
-
+    
+    // Agora pastaAno é mesmo um objeto Folder do DriveApp, o getFolders() vai funcionar
     var itMeses = pastaAno.getFolders();
+    
     while (itMeses.hasNext()) {
       var pastaMes = itMeses.next();
       var nomePastaMes = pastaMes.getName();
 
-      // Consideramos apenas pastas do tipo "Faturas_DL_mês/ano"
-      if (nomePastaMes.indexOf("Faturas_DL_") !== 0) {
-        continue;
+      // Consideramos apenas pastas do tipo "Faturas_DL_mês/ano" (ajusta se o prefixo mudar)
+      if (nomePastaMes.indexOf("Faturas_DL_") !== 0 && nomePastaMes.indexOf("Faturas_DP_") !== 0) {
+         // Nota: adicionei DP por segurança, ou valida apenas "Faturas_" se quiseres mais genérico
+         if (nomePastaMes.indexOf("Faturas_") !== 0) continue;
       }
 
       Logger.log("     > Pasta mês: " + nomePastaMes);
-
       var files = pastaMes.getFiles();
       while (files.hasNext()) {
         var f = files.next();
@@ -3150,25 +3126,26 @@ function procurarFaturaPorATCUDNoArquivo(atcud, anoPagamento) {
 
         var ssId = f.getId();
         var ssName = f.getName();
+        // Logger.log("       - A abrir ficheiro de faturas: " + ssName); // Comentei para reduzir log
 
-        Logger.log("       - A abrir ficheiro de faturas: " + ssName);
+        try {
+          var ss = SpreadsheetApp.openById(ssId);
+          var match = procurarATCUDNasAbasDeFaturas(ss, atcudNormalizado);
 
-        var ss = SpreadsheetApp.openById(ssId);
-        var match = procurarATCUDNasAbasDeFaturas(ss, atcudNormalizado);
-
-        if (match) {
-          // Completar info de contexto e devolver logo
-          match.ano = ano;
-          match.spreadsheetId = ssId;
-          match.spreadsheetName = ssName;
-          match.pastaMesNome = nomePastaMes;
-          return match;
+          if (match) {
+            match.ano = ano;
+            match.spreadsheetId = ssId;
+            match.spreadsheetName = ssName;
+            match.pastaMesNome = nomePastaMes;
+            return match;
+          }
+        } catch (e) {
+          Logger.log("       [ERRO] Não foi possível ler Spreadsheet " + ssName + ": " + e);
         }
       }
     }
   }
 
-  // Se chegou aqui, não encontrou nada
   return null;
 }
 
