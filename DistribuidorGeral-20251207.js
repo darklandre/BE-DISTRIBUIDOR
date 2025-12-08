@@ -771,29 +771,52 @@ function extrairATCUDRecibosCA(texto) {
 
 function extractDataDocumentoTaloes(pdfText) {
   if (!pdfText) return null;
+  
+  // Funções Auxiliares: InjectSpaces e limpeza de linhas, permanecem as mesmas
   const injectSpaces = s => String(s).replace(/\u00A0/g, ' ').replace(/([A-Za-z])(\d)/g, '$1 $2').replace(/(\d)([A-Za-z])/g, '$1 $2');
   const raw = injectSpaces(pdfText);
   const linesAll = raw.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  
+  // (Variáveis de filtragem permanecem as mesmas)
   const badPOS = [/\b(pos|tpa|tp[ãa]g|terminal|redeunic|multibanco|mb\s*way|sibs)\b/i, /\bvisa\b/i, /\bmastercard\b/i, /\bmaestro\b/i, /\bam[ex|erican\s*express]\b/i, /\bautoriz[aç][aã]o\b/i, /\bauth(?:orization)?\b/i, /\baid\b/i, /\batc\b/i, /\btid\b/i, /\bnsu\b/i, /\bpan\b/i, /\barqc?\b/i, /\bcomprovativo\b/i, /\breceb[ií]do\b/i, /\bmerchant\s*copy\b/i, /\bclient\s*copy\b/i, /\blote\b/i, /\bref(?:\.|er[eê]ncia)?\b/i, /\btransa[cç][aã]o\b/i, /\bvenda\b/i, /\bpagamento\b/i];
   const timeRe = /\b\d{2}:\d{2}(?::\d{2})?\b/; 
   const lines = linesAll.filter(l => !isHardBad(l));
+  
+  // RegEx de cabeçalho
   const headerRe = /\b(?:fatura\/recibo|fatura|factura|nota\s+de\s+cr[eé]dito)\b/i;
+  
+  // RegEx ORIGINAL (DD/MM/AAAA)
   const dataFieldRe = /\bdata\s*:\s*(\d{2})[./-](\d{2})[./-](\d{4})\b/i;
+  
+  // NOVO REGEX: Captura o formato ISO AAAA-MM-DD perto do label "Data:" (CORREÇÃO CHAVE)
+  const dataISOFieldRe = /\bdata\s*:\s*(20\d{2})[./-](\d{2})[./-](\d{2})\b/i; 
 
+  // --- 1. FAST EXIT (PERTO DO CABEÇALHO) ---
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i];
     if (headerRe.test(l)) {
       const look = [l, lines[i+1], lines[i+2], lines[i+3]].filter(Boolean);
       for (const seg of look) {
-        const m = seg.match(dataFieldRe);
+        
+        // Tenta DD/MM/AAAA primeiro
+        let m = seg.match(dataFieldRe);
         if (m) {
           const best = _safeDate_(m[1], m[2], m[3]);
+          if (best) return best;
+        }
+
+        // Tenta AAAA-MM-DD (CORREÇÃO)
+        m = seg.match(dataISOFieldRe);
+        if (m) {
+          // m[1]=Ano, m[2]=Mês, m[3]=Dia -> Inverter para (Dia, Mês, Ano)
+          const best = _safeDate_(m[3], m[2], m[1]); 
           if (best) return best;
         }
       }
     }
   }
 
+  // --- 2. HEURÍSTICA DE PONTUAÇÃO (Restante da Lógica) ---
   const goodLabels = [
     /data\s*(?:de)?\s*emiss[aã]o/i, 
     /\bemiss[aã]o\b/i, 
@@ -801,7 +824,7 @@ function extractDataDocumentoTaloes(pdfText) {
     /\bemitida\s+em\b/i,
     /dt\.?\s*emiss[aã]o/i,
     /\bdata\s*doc(?:umento)?\b/i,
-    /\bdata\s*:\b/i,
+    /\bdata\s*:\b/i, // <-- Este label é capturado aqui para o ISO Near Label
     /\bdata\s*da\s*fatura\b/i,
     /\binvoice\s+date\b/i, 
     /\bissue\s+date\b/i, 
@@ -811,17 +834,25 @@ function extractDataDocumentoTaloes(pdfText) {
   const hasRangeRe = /\d{1,2}[\/.\-]\d{1,2}[\/.\-]\d{2,4}\s*(?:a|–|—|-)\s*\d{1,2}[\/.\-]\d{1,2}[\/.\-]\d{2,4}/i;
 
   const oneLine = raw.replace(/\s+/g, ' ');
+  
+  // ISO NEAR LABEL (Continua a ser útil para ISO sem o 'Data:' explícito no Fast Exit)
   const isoNearLabel = new RegExp('(?:' + goodLabels.map(r=>r.source).join('|') + ')' + '[^0-9]{0,40}(20\\d{2})[./-](\\d{2})[./-](\\d{2})','i');
   let m = oneLine.match(isoNearLabel);
   if (m) {
+    // m[1]=Y, m[2]=M, m[3]=D
     const fast = _safeDate_(m[3], m[2], m[1]);
     if (fast) return fast;
   }
 
+  // Regras de Expressões Regulares de data (rx)
   const rx = [
+    // [0] AAAA/MM/DD ou AAAA-MM-DD. O norm faz a inversão (d:m[3], m:m[2], y:m[1])
     { re:/\b(20\d{2})[\/\-\.](\d{1,2})[\/\-\.](\d{1,2})\b/g, norm:(y,m,d)=>({d,m,y, iso:true}) },
-    { re:/\b(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})\b/g,     norm:(d,m,y)=>({d,m,y}) },
-    { re:/\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2})\b/g,         norm:(d,m,y)=>({d,m,y, ambiguousYY:true}) },
+    // [1] DD/MM/AAAA
+    { re:/\b(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})\b/g,     norm:(d,m,y)=>({d,m,y}) },
+    // [2] DD/MM/AA
+    { re:/\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2})\b/g,         norm:(d,m,y)=>({d,m,y, ambiguousYY:true}) },
+    // (As restantes regras de extenso e abreviaturas permanecem iguais)
     { re:/\b(\d{1,2})\s+de\s+(janeiro|fevereiro|março|marco|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro)\s+de?\s+(\d{4})\b/gi, norm:(d,mon,y)=>({d, m:_monPT_(mon), y}) },
     { re:/\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2}),\s*(\d{4})\b/gi, norm:(mon,d,y)=>({d, m:_monEN_(mon), y}) },
     { re:/\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})\s*,?\s*(\d{4})\b/gi, norm:(mon,d,y)=>({d, m:_monEN_(mon), y}) },
@@ -829,6 +860,7 @@ function extractDataDocumentoTaloes(pdfText) {
   ];
 
   const candidates = [];
+  // (A lógica de iteração e pontuação dos candidatos permanece a mesma, usando as regras 'rx' acima)
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (!line) continue;
@@ -842,6 +874,7 @@ function extractDataDocumentoTaloes(pdfText) {
       re.lastIndex = 0;
       let mm;
       while ((mm = re.exec(line)) !== null) {
+        // ... (resto da lógica de normalização, verificação de ano, e pontuação) ...
         const p = norm(...mm.slice(1));
         const dd2 = String(p.d).padStart(2,'0');
         const mm2 = String(p.m).padStart(2,'0');
@@ -868,7 +901,7 @@ function extractDataDocumentoTaloes(pdfText) {
         });
 
         let score = 0;
-        if (p.iso) score += 60;          
+        if (p.iso) score += 60;          
         if (hasGood) score += 120;
         if (near) score += 20;
         if (i < 12) score += 30;
@@ -878,6 +911,8 @@ function extractDataDocumentoTaloes(pdfText) {
       }
     }
   }
+  
+  // (Lógica de desempate final)
   if (candidates.length) {
     candidates.sort((a,b)=>{
       if (b.score !== a.score) return b.score - a.score;
