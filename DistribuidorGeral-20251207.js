@@ -89,8 +89,6 @@ function distribuirFicheirosDoGeral() {
     // CASO ESPECIAL: MEO (Escreve na fatura "Este documento não serve de fatura"!)
     // ------------------------------------------------------------------------
     
-    Logger.log(textoPDF);
-
     // Truque de Mestre:
     const ehMEO = textoPDF.includes("504 615 947");
     if(ehMEO) Logger.log("🛡️ MEO DETETADA: A neutralizar hipótese de recibo.");
@@ -327,12 +325,15 @@ function distribuirFicheirosDoGeral() {
       }
       ({ month, year } = _extrairMesAno(dataDocumento));
 
+      Logger.log("Diagnóstico: Tentando mover para pasta " + month + "/" + year);
+
       const resultado = moverParaPastaFinal_(file, year, month, "#1 - Faturas e NCs normais", sourceFolder);
       
       if (resultado.sucesso) {
         fileCount++;
         nomesFicheirosMovidos += '\n Ficheiro ' + fileName + ' para pasta ' + resultado.pasta + '\n';
       } else {
+        Logger.log("ERRO AO MOVER: " + resultado.erro); // <-- GARANTA QUE ESTA LINHA TEM LOG.
         fileErrors++;
         errosFicheirosMovidos += '\n Erro ' + fileName + ": " + resultado.erro + "\n";
       }
@@ -823,6 +824,7 @@ function extractDataDocumentoTaloes(pdfText) {
     { re:/\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2})\b/g,         norm:(d,m,y)=>({d,m,y, ambiguousYY:true}) },
     { re:/\b(\d{1,2})\s+de\s+(janeiro|fevereiro|março|marco|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro)\s+de?\s+(\d{4})\b/gi, norm:(d,mon,y)=>({d, m:_monPT_(mon), y}) },
     { re:/\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2}),\s*(\d{4})\b/gi, norm:(mon,d,y)=>({d, m:_monEN_(mon), y}) },
+    { re:/\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})\s*,?\s*(\d{4})\b/gi, norm:(mon,d,y)=>({d, m:_monEN_(mon), y}) },
     { re:/\b(\d{1,2})[.\- ](jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)[a-z]*[.\- ](\d{4})\b/gi, norm:(d,mon,y)=>({d, m:_monPTabbrev_(mon), y}) }
   ];
 
