@@ -88,14 +88,12 @@ function distribuirFicheirosDoGeral() {
     // ------------------------------------------------------------------------
     // CASO ESPECIAL: MEO (Escreve na fatura "Este documento não serve de fatura"!)
     // ------------------------------------------------------------------------
-    if(textoPDF.includes("504615947")){
-       Logger.log("🛡️ MEO DETETADA: A neutralizar frase de recibo.");
-       
-       // Truque de Mestre: Removemos a frase "venenosa" da variável de texto 't'
-       // Assim, a verificação 'ehReciboPT' lá em baixo já não vai disparar falsamente.
-       t = t.replace(/este documento não serve de factura/gi, "xxx")
-            .replace(/este documento não serve de fatura/gi, "xxx");
-    }
+    
+    Logger.log(textoPDF);
+
+    // Truque de Mestre:
+    const ehMEO = textoPDF.includes("504 615 947");
+    if(ehMEO) Logger.log("🛡️ MEO DETETADA: A neutralizar hipótese de recibo.");
 
     // ------------------------------------------------------------------------
     // CASO ESPECIAL: RADIUS ("Parte" a data da fatura da data de vencimento!)
@@ -247,15 +245,30 @@ function distribuirFicheirosDoGeral() {
     // ------------------------------------------------------------------------
     // CASO 3: RECIBOS NACIONAIS
     // ------------------------------------------------------------------------
-    const ehReciboPT = (
-      (t.includes("recibo n.º") || t.includes("recibo nº") || t.includes("recibo nr") || 
-       t.includes("recebemos a quantia de") || t.includes("recebemos a importância") ||
-       t.includes("este documento não serve de factura") || t.includes("este documento não serve de fatura") ||
-       t.includes("recibo cliente") || t.includes("total do recibo"))
-      && !t.includes("fatura/recibo") && !t.includes("fatura-recibo")
+    
+    var ehReciboPT = (
+      (
+        t.includes("recibo n.º") || t.includes("recibo nº") || t.includes("recibo nr") || 
+        t.includes("recebemos a quantia de") || t.includes("recebemos a importância") ||
+        t.includes("recibo cliente") || t.includes("total do recibo") ||
+        
+        // Mantemos a frase da MEO aqui, o filtro vem depois
+        t.includes("este documento não serve de factura") || t.includes("este documento não serve de fatura")
+      )
+      
+      // Filtros de Segurança
+      && !t.includes("fatura/recibo") 
+      && !t.includes("fatura-recibo")
     );
+    
+    // ------------------------------------------------------------------------
+    // [Passo 2] EXCLUSÃO GLOBAL (A MÁGICA FINAL)
+    // ------------------------------------------------------------------------
+    // Se ehMEO for TRUE, o resultado da linha é FALSE, anulando ehReciboPT.
+    // Se ehMEO for FALSE, o resultado é ehReciboPT (mantém o que deu no Passo 1).
+    ehReciboPT = ehReciboPT && !ehMEO;
 
-    if (ehReciboPT) {
+    if(ehReciboPT) {
       Logger.log("[RECIBO PT] " + fileName);
 
       if(!_validarData(dataDocumento, fileName)) {
