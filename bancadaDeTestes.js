@@ -24,7 +24,7 @@ function bancadaDeTestes2025() {
   // === MODO DE EXECUÇÃO ===
   // Se estiver vazio => percorre toda a árvore do ano (Faturas_DL_MM/AAAA -> #1 e #2).
   // Se tiver um ID => processa APENAS essa pasta.
-  const ONLY_FOLDER_ID = "";//102LMZvC1914IhB90_zJRvobOo5t-mv9G"; // ex.: "1AbCdefGhIJkLmNoP"
+  const ONLY_FOLDER_ID = "";//102LMZvC1914IhB90_zJRvobOo5t-mv9G"; // ex.: "1AbCfdefGhIJkLmNoP"
 
   // (opcionais) override do esperado quando usas ONLY_FOLDER_ID
   const ONLY_EXPECTED_MM   = "";   // "01".."12" ou "" para NA
