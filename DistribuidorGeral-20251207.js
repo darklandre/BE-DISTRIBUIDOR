@@ -1,7 +1,9 @@
 // Pasta onde ficam guardados os anexos que vêm do email [ficheiros por processar] (assegurado pelo N8N, que envia os anexos em pdf do email documentos@darkland.pt para a pasta)
 const PASTA_GERAL_FICHEIROS = "1DKCSluenYGGNz05uLLzQwWwq-wYHCk54";
-// Sub-pasta, "Comprovativos", onde são colocados os comprovativos depois de fazer os pagamentos
+// Sub-pasta, "#0.1 - Comprovativos", onde são colocados os comprovativos depois de fazer os pagamentos
 var PASTA_COMPROVATIVOS_ID = "1nBnKXyvtiUt7BMYdaQfYtaJbgBMe4xjR";
+// Sub-pasta, "#0.2 - Extratos de conta", onde são colocados os extratos de conta
+var PASTA_EXTRATOS_ID = "1X6qfsGSjve4IsD0HdZOtMdh7OK3oklLC";
 
 // --> Departamentos Darkpurple --> [DP] 2. Financeiro e RH (FERH) --> [DP][FERH] RH --> [DP][FERH] Recibos de vencimento --> 0 - Por processar
 const PASTA_GERAL_RECIBOS = "1AW34HuS07KvBrclaoHQIEmd0pyMCATHQ";
@@ -81,52 +83,61 @@ function distribuirFicheirosDoGeral() {
     dataDocumento = extractDataDocumentoTaloes(textoPDF);
     
     // Normalização para comparações
-    const t = (textoPDF || "").toLowerCase();
-
-
-    // ------------------------------------------------------------------------
-    // CASO: EXTRATOS (Ignorar/Logar apenas?)
-    // ------------------------------------------------------------------------
-    const ehExtrato = (t.includes("extracto de contas correntes") || t.includes("documentos de clientes por liquidar"));
-    if (ehExtrato) {
-       // Lógica futura se necessário
-    }    
-
+    let t = (textoPDF || "").toLowerCase();
 
     // ------------------------------------------------------------------------
-    // CASO: RECIBOS PT (NÃO FATURAS)
+    // CASO ESPECIAL: MEO (Escreve na fatura "Este documento não serve de fatura"!)
     // ------------------------------------------------------------------------
-    const ehReciboPT = (
-      (t.includes("recibo n.º") || t.includes("recibo nº") || t.includes("recibo nr") || 
-       t.includes("recebemos a quantia de") || t.includes("recebemos a importância") ||
-       t.includes("este documento não serve de factura") || t.includes("este documento não serve de fatura") ||
-       t.includes("recibo cliente") || t.includes("total do recibo"))
-      && !t.includes("fatura/recibo") && !t.includes("fatura-recibo")
-    );
-
-    if (ehReciboPT) {
-      Logger.log("[RECIBO PT] " + fileName);
-
-      if(!validarData_(dataDocumento, fileName)) {
-        fileErrors++; errosFicheirosMovidos += '\n Erro ' + fileName + ": Data inválida.\n"; continue;
-      }
-      
-      ({ month, year } = extrairMesAno_(dataDocumento));
-
-      // USAR HELPER DE MOVIMENTO
-      const resultado = moverParaPastaFinal_(file, year, month, "#4 - Recibos", sourceFolder);
-      
-      if (resultado.sucesso) {
-        fileCount++;
-        nomesFicheirosMovidos += '\n Ficheiro ' + fileName + '\n';
-        Logger.log("Movidp para: " + resultado.pasta);
-      } else {
-        fileErrors++;
-        errosFicheirosMovidos += '\n Erro ' + fileName + ": " + resultado.erro + "\n";
-      }
-      continue; 
+    if(textoPDF.includes("504615947")){
+       Logger.log("🛡️ MEO DETETADA: A neutralizar frase de recibo.");
+       
+       // Truque de Mestre: Removemos a frase "venenosa" da variável de texto 't'
+       // Assim, a verificação 'ehReciboPT' lá em baixo já não vai disparar falsamente.
+       t = t.replace(/este documento não serve de factura/gi, "xxx")
+            .replace(/este documento não serve de fatura/gi, "xxx");
     }
 
+    // ------------------------------------------------------------------------
+    // CASO ESPECIAL: RADIUS ("Parte" a data da fatura da data de vencimento!)
+    // ------------------------------------------------------------------------
+    if(textoPDF.includes("509001319") || textoPDF.includes("Radius") || textoPDF.includes("radius")){
+      Logger.log("🛡️ RADIUS DETETADA: A calcular a menor data (Data Fatura).");
+
+      // Regex para capturar qualquer data DD-MM-AAAA ou DD/MM/AAAA
+      var regexDatas = /(\d{2})[-./](\d{2})[-./](\d{4})/g;
+      var todasDatas = [];
+      var match;
+
+      while ((match = regexDatas.exec(textoPDF)) !== null) {
+         // match[1]=Dia, match[2]=Mes, match[3]=Ano
+         var d = parseInt(match[1], 10);
+         var m = parseInt(match[2], 10);
+         var y = parseInt(match[3], 10);
+         
+         // Filtro de segurança: datas entre 2020 e 2030 (ignora lixo de OCR)
+         if(y >= 2020 && y <= 2030 && m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+            var dateObj = new Date(y, m - 1, d); // Mes em JS é 0-11
+            todasDatas.push({
+               str: match[0].replace(/-/g, "/").replace(/\./g, "/"),
+               obj: dateObj.getTime()
+            });
+         }
+      }
+
+      if (todasDatas.length > 0) {
+         // Ordena cronologicamente: Data Mais Antiga -> Data Mais Recente
+         todasDatas.sort(function(a, b) { return a.obj - b.obj; });
+
+         // A primeira data da lista ordenada será a Data de Emissão (ex: 27/04)
+         // As seguintes serão Vencimento (ex: 12/05)
+         var menorData = todasDatas[0].str;
+         
+         if (dataDocumento !== menorData) {
+            Logger.log("✅ Data RADIUS corrigida de " + dataDocumento + " para " + menorData);
+            dataDocumento = menorData;
+         }
+      }
+    }
 
     // ------------------------------------------------------------------------
     // CASO: CRÉDITO AGRÍCOLA (Comissões, etc.)
@@ -134,10 +145,10 @@ function distribuirFicheirosDoGeral() {
     if(valorATCUD && textoPDF.includes("www.creditoagricola.pt") && (textoPDF.includes("FACTURA") || textoPDF.includes("FATURA"))){
       Logger.log("[CA FATURA] " + fileName);
 
-      if(!validarData_(dataDocumento, fileName)) {
+      if(!_validarData(dataDocumento, fileName)) {
         fileErrors++; errosFicheirosMovidos += '\n Erro ' + fileName + ": Data inválida.\n"; continue;
       }
-      ({ month, year } = extrairMesAno_(dataDocumento));
+      ({ month, year } = _extrairMesAno(dataDocumento));
 
       const resultado = moverParaPastaFinal_(file, year, month, "#1 - Faturas e NCs normais", sourceFolder);
 
@@ -150,7 +161,6 @@ function distribuirFicheirosDoGeral() {
       }
       continue; 
     }
-
 
     // ------------------------------------------------------------------------
     // CASO ESPECIAL: DIGITAL OCEAN (DP)
@@ -180,9 +190,8 @@ function distribuirFicheirosDoGeral() {
       }
     }
 
-
     // ------------------------------------------------------------------------
-    // CASOS DE LIXO / AVISOS (DL)
+    // CASO ESPECIAL: AVISOS DE SEGUROS (DL) --> LIXO
     // ------------------------------------------------------------------------
     if(CODIGO_EMPRESA==="DL"){
       if (
@@ -197,13 +206,7 @@ function distribuirFicheirosDoGeral() {
         continue;
       }
     }
-    // Lixo Geral
-    if(textoPDF.includes("Abaixo se discriminam as faturas em divida, que solicitamos que sejam liquidadas.")) {
-      file.moveTo(pastaLixo);
-      fileErrors++;
-      errosFicheirosMovidos += '\n Erro ' + fileName + ": Aviso pagamento (Lixo) ";
-      continue;
-    }
+
 
 
     // ------------------------------------------------------------------------
@@ -217,17 +220,99 @@ function distribuirFicheirosDoGeral() {
       continue; 
     } 
 
+    // ------------------------------------------------------------------------
+    // CASO 2: EXTRATOS DE CONTA CORRENTE
+    // ------------------------------------------------------------------------
+    const ehExtrato = (
+        t.includes("extracto de contas correntes") || 
+        t.includes("documentos de clientes por liquidar") ||
+        t.includes("extrato de conta de cliente") ||
+        t.includes("listagem documentos divida") ||
+        t.includes("conta-corrente") ||
+        t.includes("extractos por conta")
+    );
+
+    if (ehExtrato) {
+       Logger.log("CASO 2: Extrato de conta corrente - " + fileName);
+       // Mover diretamente para a pasta de Extratos
+       var pastaExtratos = DriveApp.getFolderById(PASTA_EXTRATOS_ID);
+       copiarMoverELog_(file, pastaExtratos, sourceFolder);
+       
+       // Adiciona ao relatório apenas como informação (não conta como erro nem como fatura)
+       errosFicheirosMovidos += '\n Info: ' + fileName + " arquivado em Extratos.";
+       
+       continue; // Salta para o próximo ficheiro
+    }    
 
     // ------------------------------------------------------------------------
-    // CASO 2: FATURA NACIONAL (Tem ATCUD, não é CA)
+    // CASO 3: RECIBOS NACIONAIS
     // ------------------------------------------------------------------------
-    if(valorATCUD && !textoPDF.includes("www.creditoagricola.pt")){
-      Logger.log("CASO 2: Fatura Nacional - " + fileName);
+    const ehReciboPT = (
+      (t.includes("recibo n.º") || t.includes("recibo nº") || t.includes("recibo nr") || 
+       t.includes("recebemos a quantia de") || t.includes("recebemos a importância") ||
+       t.includes("este documento não serve de factura") || t.includes("este documento não serve de fatura") ||
+       t.includes("recibo cliente") || t.includes("total do recibo"))
+      && !t.includes("fatura/recibo") && !t.includes("fatura-recibo")
+    );
 
-      if(!validarData_(dataDocumento, fileName)) {
+    if (ehReciboPT) {
+      Logger.log("[RECIBO PT] " + fileName);
+
+      if(!_validarData(dataDocumento, fileName)) {
         fileErrors++; errosFicheirosMovidos += '\n Erro ' + fileName + ": Data inválida.\n"; continue;
       }
-      ({ month, year } = extrairMesAno_(dataDocumento));
+      
+      ({ month, year } = _extrairMesAno(dataDocumento));
+
+      // --- LÓGICA INTELIGENTE IN-LOOP ---
+      // Tenta descobrir se o recibo pertence a uma fatura de meses anteriores
+      var origemReal = _encontrarMesOrigemDaFatura(textoPDF, year, month);
+      
+      if (origemReal) {
+         // Se encontrou a fatura original, muda o destino para lá!
+         year = origemReal.year;
+         month = origemReal.month;
+      }
+      // -----------------------------------
+
+      // USAR HELPER DE MOVIMENTO
+      const resultado = moverParaPastaFinal_(file, year, month, "#4 - Recibos", sourceFolder);
+      
+      if (resultado.sucesso) {
+        fileCount++;
+        nomesFicheirosMovidos += '\n Ficheiro ' + fileName + '\n';
+        Logger.log("Movidp para: " + resultado.pasta);
+      } else {
+        fileErrors++;
+        errosFicheirosMovidos += '\n Erro ' + fileName + ": " + resultado.erro + "\n";
+      }
+      continue; 
+    }
+
+    
+    // Lixo Geral
+    /*
+    if(textoPDF.includes("Abaixo se discriminam as faturas em divida, que solicitamos que sejam liquidadas.")) {
+      file.moveTo(pastaLixo);
+      fileErrors++;
+      errosFicheirosMovidos += '\n Erro ' + fileName + ": Aviso pagamento (Lixo) ";
+      continue;
+    }
+    */
+
+
+
+
+    // ------------------------------------------------------------------------
+    // CASO 4: FATURA NACIONAL (Tem ATCUD, não é CA)
+    // ------------------------------------------------------------------------
+    if(valorATCUD && !textoPDF.includes("www.creditoagricola.pt")){
+      Logger.log("CASO 4: Fatura Nacional - " + fileName);
+
+      if(!_validarData(dataDocumento, fileName)) {
+        fileErrors++; errosFicheirosMovidos += '\n Erro ' + fileName + ": Data inválida.\n"; continue;
+      }
+      ({ month, year } = _extrairMesAno(dataDocumento));
 
       const resultado = moverParaPastaFinal_(file, year, month, "#1 - Faturas e NCs normais", sourceFolder);
       
@@ -243,18 +328,18 @@ function distribuirFicheirosDoGeral() {
 
 
     // ------------------------------------------------------------------------
-    // CASO 3.1: FATURA ESTRANGEIRA (INVOICE - EN)
+    // CASO 5.1: FATURA ESTRANGEIRA (INVOICE - EN)
     // ------------------------------------------------------------------------
     if((textoPDF.includes("invoice") || textoPDF.includes("Invoice") || textoPDF.includes("INVOICE")) &&
        (!textoPDF.includes("receipt") && !textoPDF.includes("Receipt") && !textoPDF.includes("RECEIPT")) &&
        !textoPDF.includes("www.creditoagricola.pt")){
       
-      Logger.log("CASO 3.1: Invoice - " + fileName);
+      Logger.log("CASO 5.1: Invoice - " + fileName);
       
-      if(!validarData_(dataDocumento, fileName)) {
+      if(!_validarData(dataDocumento, fileName)) {
         fileErrors++; errosFicheirosMovidos += '\n Erro ' + fileName + ": Data inválida.\n"; continue;
       }
-      ({ month, year } = extrairMesAno_(dataDocumento));
+      ({ month, year } = _extrairMesAno(dataDocumento));
 
       const resultado = moverParaPastaFinal_(file, year, month, "#1 - Faturas e NCs normais", sourceFolder);
 
@@ -270,18 +355,18 @@ function distribuirFicheirosDoGeral() {
 
 
     // ------------------------------------------------------------------------
-    // CASO 3.2: FATURA ESTRANGEIRA S/ ATCUD (PT)
+    // CASO 5.2: FATURA ESTRANGEIRA S/ ATCUD (PT)
     // ------------------------------------------------------------------------
     if(!valorATCUD && 
       (textoPDF.includes("factura") || textoPDF.includes("Factura") || textoPDF.includes("FACTURA") ||
        textoPDF.includes("fatura") || textoPDF.includes("Fatura") || textoPDF.includes("FATURA"))) {
 
-      Logger.log("CASO 3.2: Fatura PT sem ATCUD - " + fileName);
+      Logger.log("CASO 5.2: Fatura PT sem ATCUD - " + fileName);
 
-      if(!validarData_(dataDocumento, fileName)) {
+      if(!_validarData(dataDocumento, fileName)) {
         fileErrors++; errosFicheirosMovidos += '\n Erro ' + fileName + ": Data inválida.\n"; continue;
       }
-      ({ month, year } = extrairMesAno_(dataDocumento));
+      ({ month, year } = _extrairMesAno(dataDocumento));
 
       const resultado = moverParaPastaFinal_(file, year, month, "#1 - Faturas e NCs normais", sourceFolder);
 
@@ -297,16 +382,27 @@ function distribuirFicheirosDoGeral() {
 
 
     // ------------------------------------------------------------------------
-    // CASO 4.2: RECIBO ESTRANGEIRO
+    // CASO 6.2: RECIBO ESTRANGEIRO
     // ------------------------------------------------------------------------
     if(!valorATCUD && (textoPDF.includes("receipt") || textoPDF.includes("Receipt") || textoPDF.includes("RECEIPT"))){
       
-      Logger.log("CASO 4.2: Receipt - " + fileName);
+      Logger.log("CASO 6.2: Receipt - " + fileName);
 
-      if(!validarData_(dataDocumento, fileName)) {
+      if(!_validarData(dataDocumento, fileName)) {
         fileErrors++; errosFicheirosMovidos += '\n Erro ' + fileName + ": Data inválida.\n"; continue;
       }
-      ({ month, year } = extrairMesAno_(dataDocumento));
+      ({ month, year } = _extrairMesAno(dataDocumento));
+
+      // --- LÓGICA INTELIGENTE IN-LOOP ---
+      // Tenta descobrir se o recibo pertence a uma fatura de meses anteriores
+      var origemReal = _encontrarMesOrigemDaFatura(textoPDF, year, month);
+      
+      if (origemReal) {
+         // Se encontrou a fatura original, muda o destino para lá!
+         year = origemReal.year;
+         month = origemReal.month;
+      }
+      // -----------------------------------
 
       const resultado = moverParaPastaFinal_(file, year, month, "#4 - Recibos", sourceFolder);
 
@@ -322,7 +418,7 @@ function distribuirFicheirosDoGeral() {
 
 
     // ------------------------------------------------------------------------
-    // CASO 5: COMPROVATIVO PAGAMENTO (CA)
+    // CASO 7: COMPROVATIVO PAGAMENTO (CA)
     // ------------------------------------------------------------------------
     var contaadebitar = "";
     if(CODIGO_EMPRESA==="DP") contaadebitar = "Conta a Debitar: 40294310603";
@@ -331,41 +427,18 @@ function distribuirFicheirosDoGeral() {
 
     if(textoPDF.includes(contaadebitar)){ 
       
-      Logger.log("CASO 5: Comprovativo CA - " + fileName);
-      valorATCUD = extrairATCUDRecibosCA(textoPDF);
+      Logger.log("CASO 7: Comprovativo CA Identificado - " + fileName);
       
-      if(!validarData_(dataDocumento, fileName)) {
-        fileErrors++; errosFicheirosMovidos += '\n Erro ' + fileName + ": Data inválida.\n"; continue;
-      }
-      ({ month, year } = extrairMesAno_(dataDocumento));
-
-      // Lógica específica: Verificar no Excel ANTES de mover
-      // 1. Encontrar pasta do mês
-      const pastaAno = getPastaAno_(year);
-      const pastaMes = pastaAno ? getPastaMes_(pastaAno, month, year) : null;
-
-      if (pastaMes) {
-        // 2. Verificar Excel
-        if (verificarExcelNaPasta_(pastaMes, month, year, valorATCUD)) {
-          // 3. Se OK, mover para "#5 - Comprovativos..."
-          // Reutilizamos o helper mas passamos a pastaMes já encontrada para poupar tempo?
-          // Para manter consistência e simplicidade, chamamos o helper normal.
-          const res = moverParaPastaFinal_(file, year, month, "#5 - Comprovativos de pagamento", sourceFolder);
-          if (res.sucesso) {
-             fileCount++;
-             nomesFicheirosMovidos += '\n Ficheiro ' + fileName + ' para pasta ' + res.pasta + '\n';
-          } else {
-             fileErrors++;
-             errosFicheirosMovidos += '\n Erro ' + fileName + ": " + res.erro + "\n";
-          }
-        } else {
-          fileErrors++;
-          errosFicheirosMovidos += '\n Erro ' + fileName + ": ATCUD/Excel não validado.\n";
-        }
-      } else {
-        fileErrors++;
-        errosFicheirosMovidos += '\n Erro ' + fileName + ": Pasta Mês não encontrada (" + month + "/" + year + ").\n";
-      }
+      // Apenas movemos para a pasta "Inbox" dos comprovativos. 
+      // A função 'catalogarComprovativosArquivo()' que corre no fim do script fará o resto.
+      var pastaComprovativos = DriveApp.getFolderById(PASTA_COMPROVATIVOS_ID);
+      
+      copiarMoverELog_(file, pastaComprovativos, sourceFolder);
+      
+      // Atualizar contadores (opcional, conta como ficheiro movido com sucesso)
+      fileCount++;
+      nomesFicheirosMovidos += '\n Comprovativo ' + fileName + ' enviado para processamento posterior.\n';
+      
       continue;
     }
 
@@ -390,7 +463,7 @@ function distribuirFicheirosDoGeral() {
  */
 
 // Valida se data existe e tem formato correto
-function validarData_(dataDoc, fileName) {
+function _validarData(dataDoc, fileName) {
   if (!dataDoc || dataDoc.split("/").length !== 3) {
     Logger.log("Data inválida para " + fileName + ": " + dataDoc);
     return false;
@@ -399,7 +472,7 @@ function validarData_(dataDoc, fileName) {
 }
 
 // Extrai objeto {month, year, day} de string DD/MM/AAAA
-function extrairMesAno_(dataStr) {
+function _extrairMesAno(dataStr) {
   const parts = dataStr.split("/");
   // Assumindo formato DD/MM/AAAA normalizado pelos extractors
   // Se length for 4 no último, é ano.
@@ -707,7 +780,19 @@ function extractDataDocumentoTaloes(pdfText) {
     }
   }
 
-  const goodLabels = [/data\s*(?:de)?\s*emiss[aã]o/i, /\bemiss[aã]o\b/i, /\bemitida\b/i, /\bemitida\s+em\b/i, /dt\.?\s*emiss[aã]o/i, /\bdata\s*doc(?:umento)?\b/i, /\bdata\s*:\b/i, /\binvoice\s+date\b/i, /\bissue\s+date\b/i, /\bfecha\s+de\s+emisi[oó]n\b/i];
+  const goodLabels = [
+    /data\s*(?:de)?\s*emiss[aã]o/i, 
+    /\bemiss[aã]o\b/i, 
+    /\bemitida\b/i, 
+    /\bemitida\s+em\b/i,
+    /dt\.?\s*emiss[aã]o/i,
+    /\bdata\s*doc(?:umento)?\b/i,
+    /\bdata\s*:\b/i,
+    /\bdata\s*da\s*fatura\b/i,
+    /\binvoice\s+date\b/i, 
+    /\bissue\s+date\b/i, 
+    /\bfecha\s+de\s+emisi[oó]n\b/i
+  ];
   const badLabels = [/\bvig[êe]ncia\b/i, /\bper[ií]odo\b/i, /\bvalidade\b/i, /\bcompet[êe]ncia\b/i, /\bref\.\s*(?:per[ií]odo|m[êe]s)\b/i, /\bintervalo\b/i, /\bvenc(?:imento)?\b/i, /\bprazo\b/i, /\bdue\b/i, /\bpayment\b/i];
   const hasRangeRe = /\d{1,2}[\/.\-]\d{1,2}[\/.\-]\d{2,4}\s*(?:a|–|—|-)\s*\d{1,2}[\/.\-]\d{1,2}[\/.\-]\d{2,4}/i;
 
@@ -1001,4 +1086,197 @@ function encontraColunaNoCabecalho(sheet, columnName, linhaDoCabecalho) {
     if (headerRowValues[i] === columnName) return i + 1;
   }
   return -1;
+}
+
+/**
+ * Procura nos registos (Exceis) passados usando heurística avançada:
+ * 1. Fornecedor (Nome) Match (Opcional/Reforço)
+ * 2. Valor (Price) Match (Obrigatório)
+ * 3. ID Parcial (Sequencial) Match (Obrigatório para desempatar)
+ */
+/**
+ * Procura nos registos (Exceis) passados usando heurística avançada:
+ * 1. Fornecedor (Nome) Match (Opcional/Reforço)
+ * 2. Valor (Price) Match (Obrigatório)
+ * 3. ID Parcial (Sequencial) Match (Obrigatório para desempatar)
+ */
+function _encontrarMesOrigemDaFatura(textoPdf, anoRecibo, mesRecibo) {
+  Logger.log("🕵️ [SMART MATCH] A iniciar scan para Recibo de " + mesRecibo + "/" + anoRecibo);
+  
+  // Limpa o texto PDF e normaliza
+  var textoNorm = textoPdf.toUpperCase().replace(/\s+/g, " ");
+  
+  var janelaMeses = 24; 
+  var dataBase = new Date(anoRecibo, parseInt(mesRecibo)-1, 1);
+
+  for (var i = 0; i < janelaMeses; i++) {
+    var d = new Date(dataBase);
+    d.setMonth(dataBase.getMonth() - i);
+    var checkYear = d.getFullYear();
+    var checkMonth = ("0" + (d.getMonth() + 1)).slice(-2);
+    
+     Logger.log("   > [" + (i+1) + "/24] A ver mês: " + checkMonth + "/" + checkYear);
+
+    // 1. Obter Pastas
+    var pAno = getPastaAno_(checkYear);
+    if (!pAno) continue;
+    var pMes = getPastaMes_(pAno, checkMonth, checkYear);
+    if (!pMes) continue;
+
+    var nomeFicheiroExcel = "#0 - Faturas_" + CODIGO_EMPRESA + "_" + checkMonth + "/" + checkYear;
+    var files = pMes.getFilesByName(nomeFicheiroExcel);
+    if (!files.hasNext()) {
+        Logger.log("     ⚠️ Excel não encontrado: " + nomeFicheiroExcel);
+       continue;
+    }
+
+    try {
+      var fileExcel = files.next();
+      var ss = SpreadsheetApp.open(fileExcel);
+      var abas = ["Faturas e NCs normais", "Faturas e NCs com reembolso", "Outros documentos"];
+      
+      for (var k = 0; k < abas.length; k++) {
+        var sheet = ss.getSheetByName(abas[k]);
+        if (!sheet) continue;
+        
+        var lastRow = sheet.getLastRow();
+        if (lastRow <= 2) continue;
+        
+        // --- MAPEAMENTO DE COLUNAS ---
+        var colEntidade = encontraColunaNoCabecalho(sheet, "Fornecedor", 2);
+        
+        var colValor = encontraColunaNoCabecalho(sheet, "Valor total", 2);
+
+        var colNum = encontraColunaNoCabecalho(sheet, "Nº", 2);
+        if (colNum < 0) colNum = encontraColunaNoCabecalho(sheet, "Número do documento", 2);
+        
+        var colATCUD = encontraColunaNoCabecalho(sheet, "ATCUD / Nº Documento", 2);
+        
+        // Debug das colunas encontradas (descomenta se achares que ele não está a ler as colunas)
+         Logger.log("     Aba '" + abas[k] + "' Cols: Ent=" + colEntidade + " Val=" + colValor + " Num=" + colNum + " ATCUD=" + colATCUD);
+
+        if (colValor < 0 && colNum < 0 && colATCUD < 0) continue;
+        
+        // Ler dados em memória
+        var dados = sheet.getRange(3, 1, lastRow-2, sheet.getLastColumn()).getValues();
+        
+        for (var r = 0; r < dados.length; r++) {
+          var rowData = dados[r];
+          
+          // === PASSO 1: VERIFICAR VALOR (O filtro mais forte) ===
+          // === PASSO 1: VERIFICAR VALOR (Robusto com Espaços e Milhares) ===
+          var valorMatch = false;
+          var valorExcel = rowData[colValor-1];
+            
+          // Garante que tratamos como número
+          var valorFloat = null;
+          if (typeof valorExcel === 'number') {
+             valorFloat = valorExcel;
+          } else if (typeof valorExcel === 'string') {
+             // Tenta limpar "1.000,00 €" para 1000.00
+             var limpo = valorExcel.replace(/[^0-9.,-]/g, "").replace(",", "."); 
+             // Se tiver múltiplos pontos, é chato, mas o parseFloat costuma lidar com o formato padrão JS
+             valorFloat = parseFloat(limpo);
+          }
+
+          if (valorFloat !== null && !isNaN(valorFloat)) {
+             // 1. Formato Base: "1000.00" e "1000,00"
+             var vRaw = valorFloat.toFixed(2); // "1000.00"
+             var vVirgula = vRaw.replace(".", ","); // "1000,00"
+
+             // 2. Formato com Separador de Milhares (Espaço): "1 000,00"
+             // Regex insere espaço a cada 3 digitos na parte inteira
+             var partes = vVirgula.split(",");
+             var inteiroComEspacos = partes[0].replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+             var vComEspaco = inteiroComEspacos + "," + partes[1]; // "1 000,00"
+
+             // 3. Formato com Separador de Milhares (Ponto): "1.000,00"
+             var inteiroComPontos = partes[0].replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+             var vComPonto = inteiroComPontos + "," + partes[1]; // "1.000,00"
+             
+             // DEBUG (opcional, para veres o que ele está a testar)
+             //Logger.log("Testando valores: " + vRaw + " | " + vVirgula + " | " + vComEspaco);
+
+             if (textoPdf.includes(vRaw) || 
+                 textoPdf.includes(vVirgula) || 
+                 textoPdf.includes(vComEspaco) || 
+                 textoPdf.includes(vComPonto)) {
+                 valorMatch = true;
+             }
+          }
+
+          // === PASSO 2: VERIFICAR FORNECEDOR (Opcional mas ajuda no log) ===
+          var entidadeMatch = false;
+          if (colEntidade > 0) {
+            var entidadeExcel = String(rowData[colEntidade-1]).toUpperCase().trim();
+            if (entidadeExcel.length > 2) {
+               var primeiraPalavra = entidadeExcel.split(" ")[0];
+               if (primeiraPalavra.length > 2 && textoNorm.includes(primeiraPalavra)) {
+                 entidadeMatch = true;
+               }
+            }
+          }
+
+          // === PASSO 3: VERIFICAR ID PARCIAL ===
+          var idMatch = false;
+          var idEncontrado = "";
+
+          // Tenta pelo Nº Fatura
+          if (colNum > 0) {
+             var numDoc = String(rowData[colNum-1]).toUpperCase().trim();
+             var sequencial = extractSequencial_(numDoc);
+             if (sequencial && sequencial.length >= 2) {
+               if (textoNorm.includes(sequencial)) {
+                 idMatch = true;
+                 idEncontrado = "Nº " + numDoc + " (Seq: " + sequencial + ")";
+               }
+             }
+          }
+
+          // Tenta pelo ATCUD
+          if (!idMatch && colATCUD > 0) {
+             var atcud = String(rowData[colATCUD-1]).toUpperCase().trim();
+             var seqAtcud = extractSequencial_(atcud);
+             if (seqAtcud && seqAtcud.length >= 2) {
+               if (textoNorm.includes(seqAtcud)) {
+                 idMatch = true;
+                 idEncontrado = "ATCUD " + atcud + " (Seq: " + seqAtcud + ")";
+               }
+             }
+          }
+
+          // === DECISÃO FINAL ===
+          // Exige: Valor E (ID ou Entidade Forte)
+          // Mas na tua lógica pediste ID explicitamente.
+          if (valorMatch && idMatch) {
+            Logger.log("✅ SMART MATCH CONFIRMADO!");
+            Logger.log("   -> Ficheiro: " + checkMonth + "/" + checkYear);
+            Logger.log("   -> Valor: " + rowData[colValor-1]);
+            Logger.log("   -> ID Validado: " + idEncontrado);
+            return { year: String(checkYear), month: String(checkMonth) };
+          } else if (valorMatch && !idMatch) {
+            Logger.log("      ❌ Valor bateu, mas ID não encontrado no PDF. (Excel ID: " + (colNum>0?rowData[colNum-1]:"N/A") + ")");
+          }
+        }
+      }
+    } catch(e) {
+      Logger.log("❌ Erro ao ler excel " + checkMonth + "/" + checkYear + ": " + e.message);
+    }
+  }
+  
+  Logger.log("🏁 Sem match heurístico nos últimos " + janelaMeses + " meses.");
+  return null;
+}
+
+// Helper para extrair a parte final (sequencial) de uma fatura ou ATCUD
+function extractSequencial_(str) {
+  if (!str) return null;
+  // Divide por /, -, ou espaço
+  var parts = str.split(/[\/\-\s]/);
+  // Pega na última parte que seja numérica
+  for (var i = parts.length - 1; i >= 0; i--) {
+    var p = parts[i].replace(/[^0-9]/g, ""); // limpa letras
+    if (p.length > 0) return p;
+  }
+  return null;
 }
