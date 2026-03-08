@@ -78,12 +78,112 @@ function distribuirFicheirosDoGeral() {
     }
 
     // EXTRAÇÕES BASE
-    //tipoDocumento = extractTipoDocumento(textoPDF);
     valorATCUD = extractATCUD(textoPDF);
-    dataDocumento = extractDataDocumentoTaloes(textoPDF);
-    
-    // Normalização para comparações
     let t = (textoPDF || "").toLowerCase();
+
+    // =====================================================================
+    // CAMINHO 1: CLASSIFICAÇÃO COMPLETA VIA IA
+    // =====================================================================
+    try {
+      let iaResult = classificarDocumentoViaIA(textoPDF.substring(0, 4000));
+      if (iaResult && iaResult.tipo) {
+        let iaData = (iaResult.data && /^\d{2}\/\d{2}\/\d{4}$/.test(iaResult.data.trim())) ? iaResult.data.trim() : null;
+        let iaTipo = iaResult.tipo.toLowerCase().trim();
+        Logger.log("IA: tipo=" + iaTipo + " data=" + iaData + " | " + fileName);
+
+        // --- Lixo ---
+        if (iaTipo === "lixo") {
+          file.moveTo(pastaLixo);
+          fileErrors++; errosFicheirosMovidos += '\n ' + fileName + ": Lixo (IA).\n";
+          continue;
+        }
+
+        // --- Recibo de Vencimento ---
+        if (iaTipo === "recibo_vencimento") {
+          copiarMoverELog_(file, pastaGeralRecibos, sourceFolder);
+          recCount++; nomesFicheirosMovidos += '\n Ficheiro ' + fileName + '\n';
+          Logger.log("IA → Recibo Vencimento: " + fileName);
+          continue;
+        }
+
+        // --- Extrato ---
+        if (iaTipo === "extrato") {
+          copiarMoverELog_(file, DriveApp.getFolderById(PASTA_EXTRATOS_ID), sourceFolder);
+          errosFicheirosMovidos += '\n Info: ' + fileName + " arquivado em Extratos (IA).\n";
+          Logger.log("IA → Extrato: " + fileName);
+          continue;
+        }
+
+        // --- Comprovativo ---
+        if (iaTipo === "comprovativo") {
+          copiarMoverELog_(file, DriveApp.getFolderById(PASTA_COMPROVATIVOS_ID), sourceFolder);
+          fileCount++; nomesFicheirosMovidos += '\n Comprovativo ' + fileName + ' (IA)\n';
+          Logger.log("IA → Comprovativo: " + fileName);
+          continue;
+        }
+
+        // --- Fatura / Nota de Crédito ---
+        if ((iaTipo === "fatura" || iaTipo === "nota_credito") && iaData) {
+          dataDocumento = iaData;
+          // Correção Radius: usar menor data
+          let dataRadius = _corrigirDataRadius(textoPDF, t);
+          if (dataRadius) {
+            Logger.log("Data RADIUS corrigida de " + dataDocumento + " para " + dataRadius);
+            dataDocumento = dataRadius;
+          }
+
+          if (_validarData(dataDocumento, fileName)) {
+            ({ month, year } = _extrairMesAno(dataDocumento));
+            const resultado = moverParaPastaFinal_(file, year, month, "#1 - Faturas e NCs normais", sourceFolder);
+            if (resultado.sucesso) {
+              fileCount++; nomesFicheirosMovidos += '\n ' + fileName + ' → ' + resultado.pasta + ' (IA: ' + iaTipo + ')\n';
+            } else {
+              fileErrors++; errosFicheirosMovidos += '\n Erro ' + fileName + ": " + resultado.erro + "\n";
+            }
+            Logger.log("IA → " + iaTipo + ": " + fileName);
+            continue;
+          }
+        }
+
+        // --- Recibo ---
+        if (iaTipo === "recibo" && iaData) {
+          dataDocumento = iaData;
+          if (_validarData(dataDocumento, fileName)) {
+            ({ month, year } = _extrairMesAno(dataDocumento));
+            var origemReal = _encontrarMesOrigemDaFatura(textoPDF, year, month);
+            if (origemReal) { year = origemReal.year; month = origemReal.month; }
+            const resultado = moverParaPastaFinal_(file, year, month, "#4 - Recibos", sourceFolder);
+            if (resultado.sucesso) {
+              fileCount++; nomesFicheirosMovidos += '\n ' + fileName + ' → ' + resultado.pasta + ' (IA: recibo)\n';
+            } else {
+              fileErrors++; errosFicheirosMovidos += '\n Erro ' + fileName + ": " + resultado.erro + "\n";
+            }
+            Logger.log("IA → Recibo: " + fileName);
+            continue;
+          }
+        }
+
+        Logger.log("IA parcial (" + iaTipo + ") sem data válida → fallback regex: " + fileName);
+      }
+    } catch (eClassif) {
+      Logger.log("IA classificação falhou → fallback regex: " + String(eClassif).substring(0, 100));
+    }
+
+    // =====================================================================
+    // CAMINHO 2: FALLBACK REGEX (classificação original)
+    // =====================================================================
+    dataDocumento = extractDataDocumentoTaloes(textoPDF);
+    if (!dataDocumento) {
+      try {
+        let dataIA = extrairDataViaIA(textoPDF.substring(0, 4000));
+        if (dataIA && /^\d{2}\/\d{2}\/\d{4}$/.test(dataIA.trim())) {
+          dataDocumento = dataIA.trim();
+          Logger.log("Fallback data IA: " + dataDocumento);
+        }
+      } catch (eIA) {
+        Logger.log("Fallback IA data falhou: " + String(eIA).substring(0, 100));
+      }
+    }
 
     // ------------------------------------------------------------------------
     // CASO ESPECIAL: MEO (Escreve na fatura "Este documento não serve de fatura"!)
@@ -456,6 +556,13 @@ function distribuirFicheirosDoGeral() {
       continue;
     }
 
+    // ------------------------------------------------------------------------
+    // CASO DEFAULT: Ficheiro não classificado por nenhum método
+    // ------------------------------------------------------------------------
+    fileErrors++;
+    errosFicheirosMovidos += '\n ' + fileName + ": Não classificado (sem caso aplicável, IA e regex falharam).\n";
+    Logger.log("SEM CASO: " + fileName);
+
   } // Fim While Loop
 
   // ENVIAR EMAILS DE RESUMO
@@ -469,6 +576,195 @@ function distribuirFicheirosDoGeral() {
   }
 }
 
+/**
+ * ======================================================================================
+ * HELPERS DE IA
+ * ======================================================================================
+ */
+function chamarGroq(prompt) {
+  const API_KEY = PropertiesService.getScriptProperties().getProperty("GROQ_API_KEY");
+  const url = "https://api.groq.com/openai/v1/chat/completions";
+
+  const payload = {
+    model: "meta-llama/llama-4-scout-17b-16e-instruct",
+    messages: [{ role: "user", content: prompt }]
+  };
+
+  const options = {
+    method: "post",
+    contentType: "application/json",
+    headers: { "Authorization": "Bearer " + API_KEY },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+
+  const response = UrlFetchApp.fetch(url, options);
+  const json = JSON.parse(response.getContentText());
+
+  if (json.error) {
+    throw new Error(json.error.message || JSON.stringify(json.error));
+  }
+  if (!json.choices || !json.choices.length) {
+    throw new Error("Resposta inesperada: " + JSON.stringify(json));
+  }
+
+  return json.choices[0].message.content;
+}
+
+function chamarMistral(prompt) {
+  const API_KEY = PropertiesService.getScriptProperties().getProperty("MISTRAL_API_KEY");
+  const url = "https://api.mistral.ai/v1/chat/completions";
+
+  const payload = {
+    model: "mistral-small-latest",
+    messages: [{ role: "user", content: prompt }]
+  };
+
+  const options = {
+    method: "post",
+    contentType: "application/json",
+    headers: { "Authorization": "Bearer " + API_KEY },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+
+  const response = UrlFetchApp.fetch(url, options);
+  const json = JSON.parse(response.getContentText());
+
+  if (json.error) {
+    throw new Error("Mistral: " + (json.error.message || JSON.stringify(json.error)));
+  }
+  if (!json.choices || !json.choices.length) {
+    throw new Error("Mistral resposta inesperada: " + JSON.stringify(json));
+  }
+
+  return json.choices[0].message.content;
+}
+
+function extrairDataViaIA(texto) {
+  const prompt = `Extraia apenas a data de emissão do seguinte texto de um documento.
+Retorne SOMENTE a data no formato DD/MM/AAAA, sem mais nada.
+Se não encontrar, retorne "Não encontrada".
+
+Texto:
+${texto}`;
+
+  // Tenta Groq primeiro, Mistral como fallback
+  try {
+    return chamarGroq(prompt);
+  } catch (eGroq) {
+    Logger.log("Groq falhou: " + String(eGroq).substring(0, 100) + " → a tentar Mistral...");
+    return chamarMistral(prompt);
+  }
+}
+
+/**
+ * Classificação completa de documento via IA (tipo + data + fornecedor + NIF + valor).
+ * Uma única chamada substitui toda a cadeia de if/else.
+ * Retorna objeto { tipo, data, fornecedor, nif, valor } ou null se falhar.
+ */
+function classificarDocumentoViaIA(texto) {
+  const prompt = `Classifica este documento PDF. Responde SÓ com JSON válido (sem markdown, sem \`\`\`):
+{"tipo":"...","data":"DD/MM/AAAA","fornecedor":"...","nif":"...","valor":"..."}
+
+Tipos possíveis (escolhe UM):
+- fatura = fatura, factura, invoice, fatura-recibo, fatura simplificada
+- nota_credito = nota de crédito, credit note
+- recibo = recibo de pagamento, receipt (NÃO recibo de vencimento/salário)
+- recibo_vencimento = recibo de salário, payslip
+- extrato = extrato bancário, conta-corrente, extracto
+- comprovativo = comprovativo de transferência/pagamento bancário
+- lixo = avisos, notificações, publicidade, documentos sem valor fiscal
+- desconhecido = impossível determinar
+
+"data" = data de EMISSÃO (não vencimento). Formato DD/MM/AAAA.
+Campos desconhecidos = null.
+
+Texto:
+${texto}`;
+
+  var resposta;
+  try {
+    resposta = chamarGroq(prompt);
+  } catch (eGroq) {
+    Logger.log("Groq classificação falhou: " + String(eGroq).substring(0, 80) + " → Mistral...");
+    resposta = chamarMistral(prompt);
+  }
+
+  // Limpar possível wrapping markdown
+  resposta = resposta.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
+
+  var obj = JSON.parse(resposta);
+  if (!obj || !obj.tipo) return null;
+  return obj;
+}
+
+/**
+ * Extrai a menor data do texto (usada para corrigir faturas Radius).
+ * Retorna string DD/MM/AAAA ou null.
+ */
+function _corrigirDataRadius(textoPDF, t) {
+  if (!t.includes("509001319") && !t.includes("radius")) return null;
+
+  Logger.log("RADIUS DETETADA: A calcular a menor data (Data Fatura).");
+  var regexDatas = /(\d{2})[-./](\d{2})[-./](\d{4})/g;
+  var todasDatas = [];
+  var match;
+
+  while ((match = regexDatas.exec(textoPDF)) !== null) {
+    var d = parseInt(match[1], 10);
+    var m = parseInt(match[2], 10);
+    var y = parseInt(match[3], 10);
+    if (y >= 2020 && y <= 2030 && m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+      var dateObj = new Date(y, m - 1, d);
+      todasDatas.push({
+        str: match[0].replace(/-/g, "/").replace(/\./g, "/"),
+        obj: dateObj.getTime()
+      });
+    }
+  }
+
+  if (todasDatas.length > 0) {
+    todasDatas.sort(function(a, b) { return a.obj - b.obj; });
+    return todasDatas[0].str;
+  }
+  return null;
+}
+
+/**
+ * Calcula MD5 hash de um ficheiro do Drive.
+ */
+function _computeFileHash(file) {
+  var bytes = file.getBlob().getBytes();
+  var digest = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, bytes);
+  return digest.map(function(b) { return ('0' + (b & 0xFF).toString(16)).slice(-2); }).join('');
+}
+
+/**
+ * Verifica se um ficheiro já existe (duplicado) nas pastas indicadas.
+ * Compara por tamanho primeiro (rápido) e só calcula hash se tamanho coincidir.
+ */
+function _verificarDuplicados(file, pastasParaVerificar) {
+  var tamanhoNovo = file.getSize();
+  var hashNovo = null; // Lazy: só calcula se encontrar ficheiro com mesmo tamanho
+
+  for (var p = 0; p < pastasParaVerificar.length; p++) {
+    var pasta = pastasParaVerificar[p];
+    if (!pasta) continue;
+    var existentes = pasta.getFiles();
+    while (existentes.hasNext()) {
+      var existente = existentes.next();
+      if (existente.getSize() !== tamanhoNovo) continue;
+      // Mesmo tamanho → calcular hash para confirmar
+      if (!hashNovo) hashNovo = _computeFileHash(file);
+      if (_computeFileHash(existente) === hashNovo) {
+        Logger.log("DUPLICADO: " + file.getName() + " = " + existente.getName());
+        return true;
+      }
+    }
+  }
+  return false;
+}
 
 /**
  * ======================================================================================
@@ -586,10 +882,16 @@ function moverParaPastaFinal_(file, year, month, nomeSubPasta, sourceFolder) {
 
   if (!pastaFinal) return { sucesso: false, erro: "Pasta 'PARA CATALOGAR' não encontrada." };
 
+  // Verificar duplicados (PARA CATALOGAR + já catalogados na sub-pasta)
+  if (_verificarDuplicados(file, [pastaFinal, pastaNivel1])) {
+    file.moveTo(DriveApp.getFolderById(PASTA_LIXO));
+    return { sucesso: false, erro: "Duplicado (ficheiro idêntico já existe em " + pastaMes.getName() + ")." };
+  }
+
   // Mover
   Logger.log("✅ Movendo ficheiro para: " + pastaMes.getName() + " > " + nomeSubPasta);
   copiarMoverELog_(file, pastaFinal, sourceFolder);
-  
+
   return { sucesso: true, pasta: pastaMes.getName() };
 }
 

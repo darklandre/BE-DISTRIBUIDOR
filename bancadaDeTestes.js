@@ -24,11 +24,11 @@ function bancadaDeTestes2025() {
   // === MODO DE EXECUÇÃO ===
   // Se estiver vazio => percorre toda a árvore do ano (Faturas_DL_MM/AAAA -> #1 e #2).
   // Se tiver um ID => processa APENAS essa pasta.
-  const ONLY_FOLDER_ID = "";//102LMZvC1914IhB90_zJRvobOo5t-mv9G"; // ex.: "1AbCfdefGhIJkLmNoP"
+  const ONLY_FOLDER_ID = "";//"102LMZvC1914IhB90_zJRvobOo5t-mv9G"; 
 
   // (opcionais) override do esperado quando usas ONLY_FOLDER_ID
-  const ONLY_EXPECTED_MM   = "";   // "01".."12" ou "" para NA
-  const ONLY_EXPECTED_YEAR = 2025; // usado só se ONLY_EXPECTED_MM tiver valor
+  const ONLY_EXPECTED_MM   = "01";   // "01".."12" ou "" para NA
+  const ONLY_EXPECTED_YEAR = "2025"; //2025; // usado só se ONLY_EXPECTED_MM tiver valor
 
   function _isOCRRateLimitError_(err) {
     return String(err).indexOf('User rate limit exceeded for OCR') >= 0;
@@ -150,7 +150,7 @@ function bancadaDeTestes2025() {
           continue;
         }
 
-        let data = null, origem = "", nota = "";
+        let data = null, origem = "", nota = "", dataIA = "";
         const MAX_ATTEMPTS = 1;
 
         for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
@@ -213,6 +213,13 @@ function bancadaDeTestes2025() {
             }
             // ------------------------------------------------------------------------
 
+            // Chama a IA independentemente do método anterior
+            try {
+              dataIA = extrairDataViaIA(texto.substring(0, 4000));
+              Utilities.sleep(1500); // ← aumenta para 1.5s entre chamadas
+            } catch(eIA) {
+              dataIA = "ERRO_IA: " + String(eIA).substring(0, 80);
+            }
 
             break; // sucesso
 
@@ -256,7 +263,8 @@ function bancadaDeTestes2025() {
           verdict,               // Veredicto
           origem || "",          // Origem
           `=HYPERLINK("https://drive.google.com/file/d/${it.id}/view","${it.id}")`,
-          nota
+          nota,
+          dataIA  // ← coluna nova
         ]);
 
         current_pos = i + 1; // Avança o rastreador local
@@ -346,11 +354,11 @@ function _bench_createNewSheet_() {
 
 function _bench_writeHeaderIfEmpty_(sheet) {
   if (sheet.getLastRow() > 0) return;
-  sheet.getRange(1,1,1,10).setValues([[
+  sheet.getRange(1,1,1,11).setValues([[
     "Timestamp (DD/MM/AAAA HH:MM:SS)",
     "Tag","Pasta","Ficheiro",
     "Data Detectada (DD/MM/AAAA)", // isto é a da fatura, mantém-se
-    "Esperado (MM/AAAA)","Veredicto","Origem","File ID","Nota"
+    "Esperado (MM/AAAA)","Veredicto","Origem","File ID","Nota","Data IA (Groq)"
   ]]);
   sheet.setFrozenRows(1);
 }
@@ -452,7 +460,7 @@ function listarDatasEmVariasPastas() {
         const title = it.title || "";
         if (!mime.includes("pdf") && !/\.pdf$/i.test(title)) continue;
 
-        let data = null, origem = "", nota = "";
+        let data = null, origem = "", nota = "", dataIA = "";
 
         try {
           const texto = convertPDFToText(it.id, "pt");
@@ -484,7 +492,8 @@ function listarDatasEmVariasPastas() {
           verdict,               // Veredicto
           origem || "",          // Origem
           `=HYPERLINK("https://drive.google.com/file/d/${it.id}/view","${it.id}")`,
-          nota
+          nota,
+          dataIA  // ← coluna nova
         ]);
 
         Utilities.sleep(SLEEP_MS);
