@@ -102,7 +102,7 @@ function distribuirFicheirosDoGeral() {
         if (iaTipo === "recibo_vencimento") {
           copiarMoverELog_(file, pastaGeralRecibos, sourceFolder);
           recCount++; nomesFicheirosMovidos += '\n Ficheiro ' + fileName + '\n';
-          Logger.log("IA → Recibo Vencimento: " + fileName);
+          Logger.log("✅ IA → Recibo Vencimento: " + fileName);
           continue;
         }
 
@@ -110,7 +110,7 @@ function distribuirFicheirosDoGeral() {
         if (iaTipo === "extrato") {
           copiarMoverELog_(file, DriveApp.getFolderById(PASTA_EXTRATOS_ID), sourceFolder);
           errosFicheirosMovidos += '\n Info: ' + fileName + " arquivado em Extratos (IA).\n";
-          Logger.log("IA → Extrato: " + fileName);
+          Logger.log("✅ IA → Extrato: " + fileName);
           continue;
         }
 
@@ -118,7 +118,7 @@ function distribuirFicheirosDoGeral() {
         if (iaTipo === "comprovativo") {
           copiarMoverELog_(file, DriveApp.getFolderById(PASTA_COMPROVATIVOS_ID), sourceFolder);
           fileCount++; nomesFicheirosMovidos += '\n Comprovativo ' + fileName + ' (IA)\n';
-          Logger.log("IA → Comprovativo: " + fileName);
+          Logger.log("✅ IA → Comprovativo: " + fileName);
           continue;
         }
 
@@ -137,10 +137,11 @@ function distribuirFicheirosDoGeral() {
             const resultado = moverParaPastaFinal_(file, year, month, "#1 - Faturas e NCs normais", sourceFolder);
             if (resultado.sucesso) {
               fileCount++; nomesFicheirosMovidos += '\n ' + fileName + ' → ' + resultado.pasta + ' (IA: ' + iaTipo + ')\n';
+              Logger.log("✅ IA → " + iaTipo + ": " + fileName);
             } else {
               fileErrors++; errosFicheirosMovidos += '\n Erro ' + fileName + ": " + resultado.erro + "\n";
+              Logger.log("❌ IA → " + iaTipo + ": " + fileName + " | " + resultado.erro);
             }
-            Logger.log("IA → " + iaTipo + ": " + fileName);
             continue;
           }
         }
@@ -155,10 +156,11 @@ function distribuirFicheirosDoGeral() {
             const resultado = moverParaPastaFinal_(file, year, month, "#4 - Recibos", sourceFolder);
             if (resultado.sucesso) {
               fileCount++; nomesFicheirosMovidos += '\n ' + fileName + ' → ' + resultado.pasta + ' (IA: recibo)\n';
+              Logger.log("✅ IA → Recibo: " + fileName);
             } else {
               fileErrors++; errosFicheirosMovidos += '\n Erro ' + fileName + ": " + resultado.erro + "\n";
+              Logger.log("❌ IA → Recibo: " + fileName + " | " + resultado.erro);
             }
-            Logger.log("IA → Recibo: " + fileName);
             continue;
           }
         }
@@ -309,7 +311,7 @@ function distribuirFicheirosDoGeral() {
     // CASO 1: RECIBO DE VENCIMENTO
     // ------------------------------------------------------------------------
     if (fileName.startsWith('REC_') && !textoPDF.includes("Fatura") && !textoPDF.includes("Fatura simplificada") && !textoPDF.includes("Fatura-recibo")) {
-      Logger.log("CASO 1: Recibo Vencimento - " + fileName);
+      Logger.log("✅ CASO 1: Recibo Vencimento - " + fileName);
       copiarMoverELog_(file, pastaGeralRecibos, sourceFolder);
       recCount++;
       nomesFicheirosMovidos += '\n Ficheiro ' + fileName + '\n';
@@ -329,7 +331,7 @@ function distribuirFicheirosDoGeral() {
     );
 
     if (ehExtrato) {
-       Logger.log("CASO 2: Extrato de conta corrente - " + fileName);
+       Logger.log("✅ CASO 2: Extrato de conta corrente - " + fileName);
        // Mover diretamente para a pasta de Extratos
        var pastaExtratos = DriveApp.getFolderById(PASTA_EXTRATOS_ID);
        copiarMoverELog_(file, pastaExtratos, sourceFolder);
@@ -392,7 +394,7 @@ function distribuirFicheirosDoGeral() {
       if (resultado.sucesso) {
         fileCount++;
         nomesFicheirosMovidos += '\n Ficheiro ' + fileName + '\n';
-        Logger.log("Movidp para: " + resultado.pasta);
+        Logger.log("✅ CASO 3: Recibo PT movido para: " + resultado.pasta);
       } else {
         fileErrors++;
         errosFicheirosMovidos += '\n Erro ' + fileName + ": " + resultado.erro + "\n";
@@ -418,7 +420,7 @@ function distribuirFicheirosDoGeral() {
     // CASO 4: FATURA NACIONAL (Tem ATCUD, não é CA)
     // ------------------------------------------------------------------------
     if(valorATCUD && !textoPDF.includes("www.creditoagricola.pt")){
-      Logger.log("CASO 4: Fatura Nacional - " + fileName);
+      Logger.log("✅ CASO 4: Fatura Nacional - " + fileName);
 
       if(!_validarData(dataDocumento, fileName)) {
         fileErrors++; errosFicheirosMovidos += '\n Erro ' + fileName + ": Data inválida.\n"; continue;
@@ -448,7 +450,7 @@ function distribuirFicheirosDoGeral() {
        (!textoPDF.includes("receipt") && !textoPDF.includes("Receipt") && !textoPDF.includes("RECEIPT")) &&
        !textoPDF.includes("www.creditoagricola.pt")){
       
-      Logger.log("CASO 5.1: Invoice - " + fileName);
+      Logger.log("✅ CASO 5.1: Invoice - " + fileName);
       
       if(!_validarData(dataDocumento, fileName)) {
         fileErrors++; errosFicheirosMovidos += '\n Erro ' + fileName + ": Data inválida.\n"; continue;
@@ -475,7 +477,7 @@ function distribuirFicheirosDoGeral() {
       (textoPDF.includes("factura") || textoPDF.includes("Factura") || textoPDF.includes("FACTURA") ||
        textoPDF.includes("fatura") || textoPDF.includes("Fatura") || textoPDF.includes("FATURA"))) {
 
-      Logger.log("CASO 5.2: Fatura PT sem ATCUD - " + fileName);
+      Logger.log("✅ CASO 5.2: Fatura PT sem ATCUD - " + fileName);
 
       if(!_validarData(dataDocumento, fileName)) {
         fileErrors++; errosFicheirosMovidos += '\n Erro ' + fileName + ": Data inválida.\n"; continue;
@@ -500,7 +502,7 @@ function distribuirFicheirosDoGeral() {
     // ------------------------------------------------------------------------
     if(!valorATCUD && (textoPDF.includes("receipt") || textoPDF.includes("Receipt") || textoPDF.includes("RECEIPT"))){
       
-      Logger.log("CASO 6.2: Receipt - " + fileName);
+      Logger.log("✅ CASO 6.2: Receipt - " + fileName);
 
       if(!_validarData(dataDocumento, fileName)) {
         fileErrors++; errosFicheirosMovidos += '\n Erro ' + fileName + ": Data inválida.\n"; continue;
@@ -541,7 +543,7 @@ function distribuirFicheirosDoGeral() {
 
     if(textoPDF.includes(contaadebitar)){ 
       
-      Logger.log("CASO 7: Comprovativo CA Identificado - " + fileName);
+      Logger.log("✅ CASO 7: Comprovativo CA - " + fileName);
       
       // Apenas movemos para a pasta "Inbox" dos comprovativos. 
       // A função 'catalogarComprovativosArquivo()' que corre no fim do script fará o resto.
@@ -649,12 +651,16 @@ Se não encontrar, retorne "Não encontrada".
 Texto:
 ${texto}`;
 
-  // Tenta Groq primeiro, Mistral como fallback
+  // Tenta Mistral primeiro, Groq como fallback
   try {
-    return chamarGroq(prompt);
-  } catch (eGroq) {
-    Logger.log("Groq falhou: " + String(eGroq).substring(0, 100) + " → a tentar Mistral...");
-    return chamarMistral(prompt);
+    var resultado = chamarMistral(prompt);
+    Logger.log("IA utilizada: Mistral (Small)");
+    return resultado;
+  } catch (eMistral) {
+    Logger.log("Mistral falhou: " + String(eMistral).substring(0, 100) + " → a tentar Groq...");
+    var resultado = chamarGroq(prompt);
+    Logger.log("IA utilizada: Groq (Llama 4 Scout)");
+    return resultado;
   }
 }
 
@@ -683,13 +689,16 @@ Campos desconhecidos = null.
 Texto:
 ${texto}`;
 
-  var resposta;
+  var resposta, iaUsada;
   try {
-    resposta = chamarGroq(prompt);
-  } catch (eGroq) {
-    Logger.log("Groq classificação falhou: " + String(eGroq).substring(0, 80) + " → Mistral...");
     resposta = chamarMistral(prompt);
+    iaUsada = "Mistral (Small)";
+  } catch (eMistral) {
+    Logger.log("Mistral classificação falhou: " + String(eMistral).substring(0, 80) + " → Groq...");
+    resposta = chamarGroq(prompt);
+    iaUsada = "Groq (Llama 4 Scout)";
   }
+  Logger.log("IA classificação utilizada: " + iaUsada);
 
   // Limpar possível wrapping markdown
   resposta = resposta.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
@@ -882,8 +891,27 @@ function moverParaPastaFinal_(file, year, month, nomeSubPasta, sourceFolder) {
 
   if (!pastaFinal) return { sucesso: false, erro: "Pasta 'PARA CATALOGAR' não encontrada." };
 
-  // Verificar duplicados (PARA CATALOGAR + já catalogados na sub-pasta)
-  if (_verificarDuplicados(file, [pastaFinal, pastaNivel1])) {
+  // Verificar duplicados: sub-pasta destino + irmã (#1 ↔ #2) e respetivos PARA CATALOGAR
+  var pastasParaVerificar = [pastaFinal, pastaNivel1];
+  var irma = (nomeSubPasta === "#1 - Faturas e NCs normais") ? "#2 - Faturas e NCs com reembolso"
+           : (nomeSubPasta === "#2 - Faturas e NCs com reembolso") ? "#1 - Faturas e NCs normais"
+           : null;
+  if (irma) {
+    var itIrma = pastaMes.getFolders();
+    while (itIrma.hasNext()) {
+      var pIrma = itIrma.next();
+      if (pIrma.getName() === irma) {
+        pastasParaVerificar.push(pIrma);
+        var itPC = pIrma.getFolders();
+        while (itPC.hasNext()) {
+          var pPC = itPC.next();
+          if (pPC.getName() === "PARA CATALOGAR") { pastasParaVerificar.push(pPC); break; }
+        }
+        break;
+      }
+    }
+  }
+  if (_verificarDuplicados(file, pastasParaVerificar)) {
     file.moveTo(DriveApp.getFolderById(PASTA_LIXO));
     return { sucesso: false, erro: "Duplicado (ficheiro idêntico já existe em " + pastaMes.getName() + ")." };
   }
