@@ -717,6 +717,352 @@ function extractDataDocumento_Simples_PERMISSIVA(pdfText) {
   return null;
 }
 
+/**
+ * ========================================================================
+ * BANCADA DE TESTES DO CONSENSO
+ * ========================================================================
+ * Percorre uma pasta (ou a #0), corre o consenso em cada PDF,
+ * e escreve os resultados numa spreadsheet nova para análise.
+ *
+ * Colunas: Ficheiro | Regex | Mistral | Groq | Gemini 2.0 Flash | Gemini Lite | Nome | CONSENSO | Votos | Link
+ *
+ * Configuração:
+ *   FOLDER_ID  → pasta a testar (vazio = usa #0)
+ *   MAX_FILES  → limite de ficheiros (0 = todos)
+ */
+function testarConsensoEmMassa() {
+  // === CONFIGURAÇÃO ===
+  var FOLDER_ID = ""; // Vazio = usa PASTA_GERAL_FICHEIROS (#0)
+  var MAX_FILES = 0;  // 0 = sem limite
+
+  var folderId = FOLDER_ID || PASTA_GERAL_FICHEIROS;
+  var folder = DriveApp.getFolderById(folderId);
+  Logger.log("📂 Pasta: " + folder.getName() + " (" + folderId + ")");
+
+  // Criar spreadsheet de resultados
+  var tz = "Europe/Lisbon";
+  var ssName = "Consenso Teste - " + Utilities.formatDate(new Date(), tz, "yyyyMMdd-HHmmss");
+  var ss = SpreadsheetApp.create(ssName);
+  ss.setSpreadsheetTimeZone(tz);
+  var sheet = ss.getSheets()[0];
+  sheet.setName("Resultados");
+
+  // Cabeçalho
+  sheet.getRange(1, 1, 1, 11).setValues([[
+    "Ficheiro", "Regex", "Mistral", "Groq", "Gemini 2.0 Flash", "Gemini Lite", "Nome (MM/YYYY)",
+    "CONSENSO", "Votos", "Fontes", "Link"
+  ]]);
+  sheet.setFrozenRows(1);
+  sheet.getRange(1, 1, 1, 11).setFontWeight("bold").setBackground("#4a148c").setFontColor("#ffffff");
+
+  Logger.log("📊 Sheet: " + ss.getUrl());
+
+  // Iterar PDFs
+  var files = folder.getFiles();
+  var count = 0;
+  var TIME_BUDGET = 5 * 60 * 1000 - 15000; // 5 min - margem
+  var start = Date.now();
+
+  while (files.hasNext()) {
+    if (MAX_FILES > 0 && count >= MAX_FILES) break;
+    if ((Date.now() - start) > TIME_BUDGET) {
+      Logger.log("⏱️ Time budget atingido após " + count + " ficheiros.");
+      break;
+    }
+
+    var file = files.next();
+    if (file.getMimeType() !== "application/pdf") continue;
+
+    var fileName = file.getName();
+    count++;
+    Logger.log("[" + count + "] " + fileName);
+
+    var textoPDF = "";
+    try {
+      textoPDF = convertPDFToText(file.getId(), ['pt', 'en', null]) || "";
+    } catch (e) {
+      sheet.appendRow([fileName, "ERRO OCR", "", "", "", "", "", "", "", String(e).substring(0, 80), ""]);
+      continue;
+    }
+
+    if (!textoPDF.trim()) {
+      sheet.appendRow([fileName, "PDF vazio", "", "", "", "", "", "", "", "", ""]);
+      continue;
+    }
+
+    // Correr consenso detalhado (com resultados individuais)
+    var textoParaIA = textoPDF.substring(0, 4000);
+    var prompt = "Extraia apenas a data de emissão do seguinte texto de um documento.\n" +
+      "Retorne SOMENTE a data no formato DD/MM/AAAA, sem mais nada.\n" +
+      'Se não encontrar, retorne "Não encontrada".\n\nTexto:\n' + textoParaIA;
+
+    var dataRegex = extractDataDocumentoTaloes(textoPDF) || "";
+    var dataMistral = "", dataGroq = "", dataGeminiPro = "", dataGeminiLite = "";
+
+    try { dataMistral = _normalizarDataIA(chamarMistral(prompt)) || ""; } catch (e) { dataMistral = "ERRO"; }
+    try { dataGroq = _normalizarDataIA(chamarGroq(prompt)) || ""; } catch (e) { dataGroq = "ERRO"; }
+    try { dataGeminiPro = _normalizarDataIA(chamarGemini(prompt, "gemini-2.0-flash")) || ""; } catch (e) { dataGeminiPro = "ERRO"; }
+    try { dataGeminiLite = _normalizarDataIA(chamarGemini(prompt, "gemini-3.1-flash-lite-preview")) || ""; } catch (e) { dataGeminiLite = "ERRO"; }
+
+    var nomeInfo = _extrairDataDoNomeFicheiro(fileName);
+    var nomeStr = nomeInfo ? (nomeInfo.month + "/" + nomeInfo.year) : "";
+
+    // Consenso completo (reutiliza o resultado)
+    var consenso = _consensoData(fileName, textoPDF);
+
+    var link = '=HYPERLINK("https://drive.google.com/file/d/' + file.getId() + '/view","abrir")';
+
+    sheet.appendRow([
+      fileName,
+      dataRegex,
+      dataMistral,
+      dataGroq,
+      dataGeminiPro,
+      dataGeminiLite,
+      nomeStr,
+      consenso.data || "SEM DATA",
+      consenso.votos + "/6",
+      consenso.fontes.join(", "),
+      link
+    ]);
+  }
+
+  // Formatação condicional: colorir consenso
+  var lastRow = Math.max(sheet.getLastRow(), 2);
+  var colConsenso = 8;
+  sheet.setConditionalFormatRules([
+    SpreadsheetApp.newConditionalFormatRule()
+      .whenTextEqualTo("SEM DATA").setBackground("#c62828").setFontColor("#ffffff")
+      .setRanges([sheet.getRange(2, colConsenso, lastRow)]).build(),
+    SpreadsheetApp.newConditionalFormatRule()
+      .whenTextContains("/").setBackground("#2e7d32").setFontColor("#ffffff")
+      .setRanges([sheet.getRange(2, colConsenso, lastRow)]).build()
+  ]);
+
+  // Auto-resize
+  for (var c = 1; c <= 11; c++) sheet.autoResizeColumn(c);
+
+  Logger.log("✅ Teste concluído: " + count + " ficheiros processados.");
+  Logger.log("📊 Resultados: " + ss.getUrl());
+}
+
+/**
+ * ========================================================================
+ * BANCADA DE CONSENSO 2025 — Percorre TODOS os PDFs do ano
+ * ========================================================================
+ * Para cada PDF em #1 e #2 de cada mês, corre o consenso de 6 fontes
+ * e compara o resultado com o mês esperado (pasta onde está).
+ *
+ * Suporta retoma automática (ScriptProperties) — se exceder o time budget
+ * de 5 minutos, grava o progresso e continua na próxima execução.
+ *
+ * Para recomeçar do zero: corre consensoReset() primeiro.
+ *
+ * Resultados escritos numa spreadsheet com veredicto OK/FAIL.
+ */
+function testarConsenso2025() {
+  // === CONFIGURAÇÃO ===
+  var YEAR = 2025;
+  var PARENT_FOLDER_ID = "1z3HZIF1EoaCbQyAPSU2XNVnouFc62x3M";
+  var TIME_BUDGET_MS = 5 * 60 * 1000 - 15000; // 5 min - 15s margem
+  var start = Date.now();
+
+  var props = PropertiesService.getScriptProperties();
+  var IDX_KEY = "CONS_IDX";
+  var TOKEN_KEY_PREFIX = "CONS_TOKEN_";
+  var POS_KEY_PREFIX = "CONS_POS_";
+  var SS_KEY = "CONS_SHEET_ID";
+
+  // === SHEET DE RESULTADOS (reutiliza entre execuções) ===
+  var ssId = props.getProperty(SS_KEY);
+  var ss, sheet;
+  if (ssId) {
+    try {
+      ss = SpreadsheetApp.openById(ssId);
+      sheet = ss.getSheetByName("Consenso");
+    } catch (e) { ssId = null; }
+  }
+  if (!ssId) {
+    var tz = "Europe/Lisbon";
+    var ssName = "Consenso 2025 - " + Utilities.formatDate(new Date(), tz, "yyyyMMdd-HHmmss");
+    ss = SpreadsheetApp.create(ssName);
+    ss.setSpreadsheetTimeZone(tz);
+    sheet = ss.getSheets()[0];
+    sheet.setName("Consenso");
+    sheet.getRange(1, 1, 1, 13).setValues([[
+      "Mês", "Pasta", "Ficheiro",
+      "Regex", "Mistral", "Groq", "Gemini 2.0 Flash", "Gemini Lite", "Nome",
+      "CONSENSO", "Esperado", "Veredicto", "Link"
+    ]]);
+    sheet.setFrozenRows(1);
+    sheet.getRange(1, 1, 1, 13).setFontWeight("bold").setBackground("#4a148c").setFontColor("#ffffff");
+    props.setProperty(SS_KEY, ss.getId());
+  }
+  Logger.log("📊 Sheet: " + ss.getUrl());
+
+  // === ALVOS (reutiliza _bench_getTargetsFromParent_ da bancada existente) ===
+  var folders = _bench_getTargetsFromParent_(PARENT_FOLDER_ID, YEAR);
+
+  var idx = Number(props.getProperty(IDX_KEY) || 0);
+  if (idx < 0 || idx >= folders.length) idx = 0;
+
+  // === LOOP POR PASTAS ===
+  for (; idx < folders.length; idx++) {
+    if ((Date.now() - start) > TIME_BUDGET_MS) {
+      props.setProperty(IDX_KEY, String(idx));
+      Logger.log("⏱️ Time budget — retoma em idx=" + idx);
+      return;
+    }
+
+    var mm = folders[idx][0];
+    var folderId = folders[idx][1];
+    var folder;
+    try { folder = DriveApp.getFolderById(folderId); } catch (e) { continue; }
+    var folderName = folder.getName();
+    var esperado = mm + "/" + YEAR;
+    Logger.log("[" + mm + "] " + folderName);
+
+    // Paginação Drive
+    var TOKEN_KEY = TOKEN_KEY_PREFIX + folderId;
+    var POS_KEY = POS_KEY_PREFIX + folderId;
+    var pageToken = props.getProperty(TOKEN_KEY) || null;
+
+    var q = "'" + folderId + "' in parents and trashed=false";
+    var fields = "nextPageToken,items(id,title,mimeType)";
+
+    while (true) {
+      if ((Date.now() - start) > TIME_BUDGET_MS) {
+        props.setProperty(TOKEN_KEY, pageToken || "");
+        props.setProperty(IDX_KEY, String(idx));
+        Logger.log("⏱️ Time budget (página) — retoma em idx=" + idx);
+        return;
+      }
+
+      var resp = Drive.Files.list({ q: q, pageToken: pageToken, maxResults: 50, fields: fields, orderBy: "title" });
+      var items = resp.items || [];
+      if (!items.length) { props.deleteProperty(TOKEN_KEY); props.deleteProperty(POS_KEY); break; }
+
+      var pos = Number(props.getProperty(POS_KEY) || 0);
+      if (pos < 0 || pos > items.length) pos = 0;
+      var rows = [];
+
+      for (var i = pos; i < items.length; i++) {
+        if ((Date.now() - start) > TIME_BUDGET_MS) {
+          // Flush + checkpoint
+          if (rows.length) sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
+          props.setProperty(POS_KEY, String(i));
+          props.setProperty(TOKEN_KEY, pageToken || "");
+          props.setProperty(IDX_KEY, String(idx));
+          Logger.log("⏱️ Time budget (ficheiro " + i + ") — retoma guardada.");
+          return;
+        }
+
+        var it = items[i];
+        var mime = (it.mimeType || "").toLowerCase();
+        var title = it.title || "";
+        if (!mime.includes("pdf") && !/\.pdf$/i.test(title)) continue;
+
+        // OCR
+        var textoPDF = "";
+        try {
+          textoPDF = convertPDFToText(it.id, ['pt', 'en', null]) || "";
+        } catch (e) {
+          rows.push([mm, folderName, title, "ERRO OCR", "", "", "", "", "", "", esperado, "ERRO", ""]);
+          continue;
+        }
+        if (!textoPDF.trim()) {
+          rows.push([mm, folderName, title, "PDF vazio", "", "", "", "", "", "", esperado, "ERRO", ""]);
+          continue;
+        }
+
+        // Resultados individuais
+        var textoParaIA = textoPDF.substring(0, 4000);
+        var prompt = "Extraia apenas a data de emissão do seguinte texto de um documento.\n" +
+          "Retorne SOMENTE a data no formato DD/MM/AAAA, sem mais nada.\n" +
+          'Se não encontrar, retorne "Não encontrada".\n\nTexto:\n' + textoParaIA;
+
+        var dataRegex = extractDataDocumentoTaloes(textoPDF) || "";
+        var dataMistral = "", dataGroq = "", dataGeminiPro = "", dataGeminiLite = "";
+
+        try { dataMistral = _normalizarDataIA(chamarMistral(prompt)) || ""; } catch (e) { dataMistral = "ERRO"; }
+        try { dataGroq = _normalizarDataIA(chamarGroq(prompt)) || ""; } catch (e) { dataGroq = "ERRO"; }
+        try { dataGeminiPro = _normalizarDataIA(chamarGemini(prompt, "gemini-2.0-flash")) || ""; } catch (e) { dataGeminiPro = "ERRO"; }
+        try { dataGeminiLite = _normalizarDataIA(chamarGemini(prompt, "gemini-3.1-flash-lite-preview")) || ""; } catch (e) { dataGeminiLite = "ERRO"; }
+
+        var nomeInfo = _extrairDataDoNomeFicheiro(title);
+        var nomeStr = nomeInfo ? (nomeInfo.month + "/" + nomeInfo.year) : "";
+
+        // Consenso
+        var consenso = _consensoData(title, textoPDF);
+        var consensoData = consenso.data || "";
+
+        // Veredicto: comparar MM/YYYY do consenso com esperado
+        var veredicto = "FAIL";
+        if (consensoData) {
+          var cParts = consensoData.split("/");
+          if (cParts.length === 3 && (cParts[1] + "/" + cParts[2]) === esperado) {
+            veredicto = "OK";
+          }
+        }
+
+        var link = '=HYPERLINK("https://drive.google.com/file/d/' + it.id + '/view","abrir")';
+
+        rows.push([
+          mm, folderName, title,
+          dataRegex, dataMistral, dataGroq, dataGeminiPro, dataGeminiLite, nomeStr,
+          consensoData || "SEM DATA", esperado, veredicto, link
+        ]);
+      } // for items
+
+      // Flush
+      if (rows.length) {
+        sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
+      }
+
+      // Próxima página
+      pageToken = resp.nextPageToken || null;
+      props.deleteProperty(POS_KEY);
+      if (!pageToken) { props.deleteProperty(TOKEN_KEY); break; }
+    } // while páginas
+
+    props.deleteProperty(TOKEN_KEY_PREFIX + folderId);
+    props.deleteProperty(POS_KEY_PREFIX + folderId);
+    props.setProperty(IDX_KEY, String(idx + 1));
+    Logger.log("[" + mm + "] FIM PASTA");
+  } // for folders
+
+  // Formatação final
+  var lastRow = Math.max(sheet.getLastRow(), 2);
+  sheet.setConditionalFormatRules([
+    SpreadsheetApp.newConditionalFormatRule()
+      .whenTextEqualTo("OK").setBackground("#2e7d32").setFontColor("#ffffff")
+      .setRanges([sheet.getRange(2, 12, lastRow)]).build(),
+    SpreadsheetApp.newConditionalFormatRule()
+      .whenTextEqualTo("FAIL").setBackground("#c62828").setFontColor("#ffffff")
+      .setRanges([sheet.getRange(2, 12, lastRow)]).build(),
+    SpreadsheetApp.newConditionalFormatRule()
+      .whenTextEqualTo("ERRO").setBackground("#e65100").setFontColor("#ffffff")
+      .setRanges([sheet.getRange(2, 12, lastRow)]).build()
+  ]);
+  for (var c = 1; c <= 13; c++) sheet.autoResizeColumn(c);
+
+  // Limpar estado de retoma
+  props.deleteProperty(IDX_KEY);
+  props.deleteProperty(SS_KEY);
+  Logger.log("✅ Bancada Consenso 2025 concluída.");
+  Logger.log("📊 Resultados: " + ss.getUrl());
+}
+
+/** Limpa o estado de retoma do teste de consenso (recomeça do zero) */
+function consensoReset() {
+  var props = PropertiesService.getScriptProperties();
+  var all = props.getKeys();
+  all.forEach(function(k) { if (k.indexOf("CONS_") === 0) props.deleteProperty(k); });
+  // Limpar também cache de targets
+  props.deleteProperty("BENCH_TARGETS_CACHE");
+  Logger.log("🔄 Retoma do consenso limpa — recomeça do zero na próxima execução.");
+}
+
 function _safeDatePERMISSIVA_(dd, mm, yyyy) {
   const d = new Date(Number(yyyy), Number(mm)-1, Number(dd));
   const today = new Date();

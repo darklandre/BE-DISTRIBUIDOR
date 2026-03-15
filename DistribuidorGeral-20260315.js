@@ -24,6 +24,8 @@ const DESTINO_PATH_DEPTH = 3; // Quantos pais escreve na spreadsheet do destino 
 
 // Cache em memória das pastas de anos
 var __cacheYearFolders = null;
+var __cachePastaAno = {};
+var __cachePastaMes = {};
 
 /*
 *
@@ -82,14 +84,27 @@ function distribuirFicheirosDoGeral() {
     let t = (textoPDF || "").toLowerCase();
 
     // =====================================================================
-    // CAMINHO 1: CLASSIFICAÇÃO COMPLETA VIA IA
+    // PASSO 1: CONSENSO DE DATA (5 fontes → data mais votada)
     // =====================================================================
+    let consenso = _consensoData(fileName, textoPDF);
+    dataDocumento = consenso.data;
+
+    // Correção Radius: se Radius, forçar menor data (override consenso)
+    let dataRadius = _corrigirDataRadius(textoPDF, t);
+    if (dataRadius && dataRadius !== dataDocumento) {
+      Logger.log("Data RADIUS corrigida de " + dataDocumento + " para " + dataRadius);
+      dataDocumento = dataRadius;
+    }
+
+    // =====================================================================
+    // PASSO 2: CLASSIFICAÇÃO DE TIPO VIA IA
+    // =====================================================================
+    let iaTipo = null;
     try {
       let iaResult = classificarDocumentoViaIA(textoPDF.substring(0, 4000));
       if (iaResult && iaResult.tipo) {
-        let iaData = (iaResult.data && /^\d{2}\/\d{2}\/\d{4}$/.test(iaResult.data.trim())) ? iaResult.data.trim() : null;
-        let iaTipo = iaResult.tipo.toLowerCase().trim();
-        Logger.log("IA: tipo=" + iaTipo + " data=" + iaData + " | " + fileName);
+        iaTipo = iaResult.tipo.toLowerCase().trim();
+        Logger.log("IA tipo: " + iaTipo + " | " + fileName);
 
         // --- Lixo ---
         if (iaTipo === "lixo") {
@@ -122,69 +137,38 @@ function distribuirFicheirosDoGeral() {
           continue;
         }
 
-        // --- Fatura / Nota de Crédito ---
-        if ((iaTipo === "fatura" || iaTipo === "nota_credito") && iaData) {
-          dataDocumento = iaData;
-          // Correção Radius: usar menor data
-          let dataRadius = _corrigirDataRadius(textoPDF, t);
-          if (dataRadius) {
-            Logger.log("Data RADIUS corrigida de " + dataDocumento + " para " + dataRadius);
-            dataDocumento = dataRadius;
+        // --- Fatura / Nota de Crédito (com data do consenso) ---
+        if ((iaTipo === "fatura" || iaTipo === "nota_credito") && _validarData(dataDocumento, fileName)) {
+          ({ month, year } = _extrairMesAno(dataDocumento));
+          const resultado = moverParaPastaFinal_(file, year, month, "#1 - Faturas e NCs normais", sourceFolder);
+          if (resultado.sucesso) {
+            fileCount++; nomesFicheirosMovidos += '\n ' + fileName + ' → ' + resultado.pasta + ' (IA: ' + iaTipo + ', ' + consenso.votos + ' votos)\n';
+            Logger.log("✅ IA → " + iaTipo + ": " + fileName);
+          } else {
+            fileErrors++; errosFicheirosMovidos += '\n Erro ' + fileName + ": " + resultado.erro + "\n";
           }
-
-          if (_validarData(dataDocumento, fileName)) {
-            ({ month, year } = _extrairMesAno(dataDocumento));
-            const resultado = moverParaPastaFinal_(file, year, month, "#1 - Faturas e NCs normais", sourceFolder);
-            if (resultado.sucesso) {
-              fileCount++; nomesFicheirosMovidos += '\n ' + fileName + ' → ' + resultado.pasta + ' (IA: ' + iaTipo + ')\n';
-              Logger.log("✅ IA → " + iaTipo + ": " + fileName);
-            } else {
-              fileErrors++; errosFicheirosMovidos += '\n Erro ' + fileName + ": " + resultado.erro + "\n";
-              Logger.log("❌ IA → " + iaTipo + ": " + fileName + " | " + resultado.erro);
-            }
-            continue;
-          }
+          continue;
         }
 
-        // --- Recibo ---
-        if (iaTipo === "recibo" && iaData) {
-          dataDocumento = iaData;
-          if (_validarData(dataDocumento, fileName)) {
-            ({ month, year } = _extrairMesAno(dataDocumento));
-            var origemReal = _encontrarMesOrigemDaFatura(textoPDF, year, month);
-            if (origemReal) { year = origemReal.year; month = origemReal.month; }
-            const resultado = moverParaPastaFinal_(file, year, month, "#4 - Recibos", sourceFolder);
-            if (resultado.sucesso) {
-              fileCount++; nomesFicheirosMovidos += '\n ' + fileName + ' → ' + resultado.pasta + ' (IA: recibo)\n';
-              Logger.log("✅ IA → Recibo: " + fileName);
-            } else {
-              fileErrors++; errosFicheirosMovidos += '\n Erro ' + fileName + ": " + resultado.erro + "\n";
-              Logger.log("❌ IA → Recibo: " + fileName + " | " + resultado.erro);
-            }
-            continue;
+        // --- Recibo (com data do consenso + Smart Match) ---
+        if (iaTipo === "recibo" && _validarData(dataDocumento, fileName)) {
+          ({ month, year } = _extrairMesAno(dataDocumento));
+          var origemReal = _encontrarMesOrigemDaFatura(textoPDF, year, month);
+          if (origemReal) { year = origemReal.year; month = origemReal.month; }
+          const resultado = moverParaPastaFinal_(file, year, month, "#4 - Recibos", sourceFolder);
+          if (resultado.sucesso) {
+            fileCount++; nomesFicheirosMovidos += '\n ' + fileName + ' → ' + resultado.pasta + ' (IA: recibo, ' + consenso.votos + ' votos)\n';
+            Logger.log("✅ IA → Recibo: " + fileName);
+          } else {
+            fileErrors++; errosFicheirosMovidos += '\n Erro ' + fileName + ": " + resultado.erro + "\n";
           }
+          continue;
         }
 
-        Logger.log("IA parcial (" + iaTipo + ") sem data válida → fallback regex: " + fileName);
+        Logger.log("IA tipo=" + iaTipo + " mas sem data válida → fallback regex: " + fileName);
       }
     } catch (eClassif) {
       Logger.log("IA classificação falhou → fallback regex: " + String(eClassif).substring(0, 100));
-    }
-
-    // =====================================================================
-    // CAMINHO 2: FALLBACK REGEX (classificação original)
-    // =====================================================================
-    dataDocumento = extractDataDocumentoTaloes(textoPDF);
-    if (!dataDocumento) {
-      try {
-        let dataIA = extrairDataViaIA(textoPDF.substring(0, 4000));
-        if (dataIA && /^\d{2}\/\d{2}\/\d{4}$/.test(dataIA.trim())) {
-          dataDocumento = dataIA.trim();
-          Logger.log("Fallback data IA: " + dataDocumento);
-        }
-      } catch (eIA) {
-        Logger.log("Fallback IA data falhou: " + String(eIA).substring(0, 100));
-      }
     }
 
     // ------------------------------------------------------------------------
@@ -195,47 +179,7 @@ function distribuirFicheirosDoGeral() {
     const ehMEO = textoPDF.includes("504 615 947");
     if(ehMEO) Logger.log("🛡️ MEO DETETADA: A neutralizar hipótese de recibo.");
 
-    // ------------------------------------------------------------------------
-    // CASO ESPECIAL: RADIUS ("Parte" a data da fatura da data de vencimento!)
-    // ------------------------------------------------------------------------
-    if(textoPDF.includes("509001319") || textoPDF.includes("Radius") || textoPDF.includes("radius")){
-      Logger.log("🛡️ RADIUS DETETADA: A calcular a menor data (Data Fatura).");
-
-      // Regex para capturar qualquer data DD-MM-AAAA ou DD/MM/AAAA
-      var regexDatas = /(\d{2})[-./](\d{2})[-./](\d{4})/g;
-      var todasDatas = [];
-      var match;
-
-      while ((match = regexDatas.exec(textoPDF)) !== null) {
-         // match[1]=Dia, match[2]=Mes, match[3]=Ano
-         var d = parseInt(match[1], 10);
-         var m = parseInt(match[2], 10);
-         var y = parseInt(match[3], 10);
-         
-         // Filtro de segurança: datas entre 2020 e 2030 (ignora lixo de OCR)
-         if(y >= 2020 && y <= 2030 && m >= 1 && m <= 12 && d >= 1 && d <= 31) {
-            var dateObj = new Date(y, m - 1, d); // Mes em JS é 0-11
-            todasDatas.push({
-               str: match[0].replace(/-/g, "/").replace(/\./g, "/"),
-               obj: dateObj.getTime()
-            });
-         }
-      }
-
-      if (todasDatas.length > 0) {
-         // Ordena cronologicamente: Data Mais Antiga -> Data Mais Recente
-         todasDatas.sort(function(a, b) { return a.obj - b.obj; });
-
-         // A primeira data da lista ordenada será a Data de Emissão (ex: 27/04)
-         // As seguintes serão Vencimento (ex: 12/05)
-         var menorData = todasDatas[0].str;
-         
-         if (dataDocumento !== menorData) {
-            Logger.log("✅ Data RADIUS corrigida de " + dataDocumento + " para " + menorData);
-            dataDocumento = menorData;
-         }
-      }
-    }
+    // NOTA: Correção Radius já feita no Passo 1 (via _corrigirDataRadius)
 
     // ------------------------------------------------------------------------
     // CASO: CRÉDITO AGRÍCOLA (Comissões, etc.)
@@ -260,33 +204,7 @@ function distribuirFicheirosDoGeral() {
       continue; 
     }
 
-    // ------------------------------------------------------------------------
-    // CASO ESPECIAL: DIGITAL OCEAN (DP)
-    // ------------------------------------------------------------------------
-    if(CODIGO_EMPRESA==="DP" && textoPDF.includes("DigitalOcean")){
-      var dateRegex5 = /(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2}),\s+(\d{4})/i;
-      var match5 = textoPDF.match(dateRegex5);
-
-      if (match5) {
-        var monthMapEnglish = {"january": "01", "february": "02", "march": "03", "april": "04", "may": "05", "june": "06", "july": "07", "august": "08", "september": "09", "october": "10", "november": "11", "december": "12"};
-        month = monthMapEnglish[match5[1].toLowerCase()];
-        year = match5[3];
-
-        const resultado = moverParaPastaFinal_(file, year, month, "#1 - Faturas e NCs normais", sourceFolder);
-        if (resultado.sucesso) {
-           fileCount++;
-           nomesFicheirosMovidos += '\n Ficheiro ' + fileName + ' para pasta ' + resultado.pasta + '\n';
-        } else {
-           fileErrors++;
-           errosFicheirosMovidos += '\n Erro ' + fileName + ": " + resultado.erro + "\n";
-        }
-        continue;
-      } else {
-        fileErrors++;
-        errosFicheirosMovidos += '\n Erro ' + fileName + ": DOcean data não encontrada.\n";
-        continue;
-      }
-    }
+    // NOTA: Digital Ocean — data já determinada pelo consenso (IAs lidam com datas em inglês)
 
     // ------------------------------------------------------------------------
     // CASO ESPECIAL: AVISOS DE SEGUROS (DL) --> LIXO
@@ -643,13 +561,42 @@ function chamarMistral(prompt) {
   return json.choices[0].message.content;
 }
 
-function extrairDataViaIA(texto) {
-  const prompt = `Extraia apenas a data de emissão do seguinte texto de um documento.
-Retorne SOMENTE a data no formato DD/MM/AAAA, sem mais nada.
-Se não encontrar, retorne "Não encontrada".
+function chamarGemini(prompt, modelo) {
+  const API_KEY = PropertiesService.getScriptProperties().getProperty("GEMINI_API_KEY");
+  if (!API_KEY) throw new Error("GEMINI_API_KEY não configurada");
+  var modelId = modelo || "gemini-2.0-flash";
+  const url = "https://generativelanguage.googleapis.com/v1beta/models/" + modelId + ":generateContent?key=" + API_KEY;
 
-Texto:
-${texto}`;
+  const payload = {
+    contents: [{ parts: [{ text: prompt }] }],
+    generationConfig: { temperature: 0, maxOutputTokens: 100 }
+  };
+
+  const options = {
+    method: "post",
+    contentType: "application/json",
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+
+  const response = UrlFetchApp.fetch(url, options);
+  const json = JSON.parse(response.getContentText());
+
+  if (json.error) {
+    throw new Error("Gemini: " + (json.error.message || JSON.stringify(json.error)));
+  }
+
+  var text = "";
+  try { text = json.candidates[0].content.parts[0].text; } catch (e) {
+    throw new Error("Gemini resposta inesperada: " + JSON.stringify(json).substring(0, 200));
+  }
+  return text;
+}
+
+function extrairDataViaIA(texto) {
+  const prompt = "Extraia apenas a data de emissão do seguinte texto de um documento.\n" +
+    "Retorne SOMENTE a data no formato DD/MM/AAAA, sem mais nada.\n" +
+    'Se não encontrar, retorne "Não encontrada".\n\nTexto:\n' + texto;
 
   // Tenta Mistral primeiro, Groq como fallback
   try {
@@ -662,6 +609,132 @@ ${texto}`;
     Logger.log("IA utilizada: Groq (Llama 4 Scout)");
     return resultado;
   }
+}
+
+/**
+ * ======================================================================================
+ * ALGORITMO DE CONSENSO DE DATAS (5 fontes → data mais votada)
+ * ======================================================================================
+ *
+ * Fontes (6):
+ * 1. Regex OCR (extractDataDocumentoTaloes)
+ * 2. IA Mistral (Small, grátis)
+ * 3. IA Groq (Llama 4 Scout, grátis)
+ * 4. IA Gemini 2.0 Flash (grátis)
+ * 5. IA Gemini 3.1 Flash Lite Preview (grátis)
+ * 6. Nome do ficheiro (parse FONTE_YYYY-MM_ID.pdf → só MM/YYYY, voto parcial)
+ *
+ * O consenso escolhe a data com mais votos (maioria simples).
+ * Para o nome do ficheiro (só MM/YYYY), conta como voto se mês e ano coincidem.
+ */
+function _extrairDataDoNomeFicheiro(fileName) {
+  // Formato: FONTE_YYYY-MM_ID.pdf → extraímos YYYY e MM
+  var m = fileName.match(/[_](\d{4})-(\d{2})[_]/);
+  if (m) return { month: m[2], year: m[1] }; // Sem dia — voto parcial
+  return null;
+}
+
+function _normalizarDataIA(resultado) {
+  if (!resultado) return null;
+  var limpo = resultado.trim().replace(/```/g, "").replace(/["""]/g, "").trim();
+  var m = limpo.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+  if (m) {
+    var safe = _safeDate_(m[1], m[2], m[3]);
+    return safe; // DD/MM/YYYY ou null
+  }
+  return null;
+}
+
+function _extrairDataViaModelo(texto, nomeFuncao, funcaoChamar) {
+  var prompt = "Extraia apenas a data de emissão do seguinte texto de um documento.\n" +
+    "Retorne SOMENTE a data no formato DD/MM/AAAA, sem mais nada.\n" +
+    'Se não encontrar, retorne "Não encontrada".\n\nTexto:\n' + texto;
+  try {
+    var resultado = funcaoChamar(prompt);
+    var data = _normalizarDataIA(resultado);
+    Logger.log("  [CONSENSO] " + nomeFuncao + ": " + (data || "sem data"));
+    return data;
+  } catch (e) {
+    Logger.log("  [CONSENSO] " + nomeFuncao + " ERRO: " + String(e).substring(0, 80));
+    return null;
+  }
+}
+
+function _consensoData(fileName, textoPDF) {
+  Logger.log("🗳️ [CONSENSO] A iniciar para: " + fileName);
+  var textoParaIA = textoPDF.substring(0, 4000);
+  var votos = {}; // { "DD/MM/YYYY": count }
+  var fontes = {}; // { "DD/MM/YYYY": ["fonte1", "fonte2"] }
+
+  function registarVoto(data, fonte) {
+    if (!data) return;
+    if (!votos[data]) { votos[data] = 0; fontes[data] = []; }
+    votos[data]++;
+    fontes[data].push(fonte);
+  }
+
+  // --- FONTE 1: Regex OCR (rápido, sem API) ---
+  var dataRegex = extractDataDocumentoTaloes(textoPDF);
+  registarVoto(dataRegex, "Regex");
+
+  // --- FONTE 2: IA Mistral ---
+  var dataMistral = _extrairDataViaModelo(textoParaIA, "Mistral", chamarMistral);
+  registarVoto(dataMistral, "Mistral");
+
+  // --- FONTE 3: IA Groq ---
+  var dataGroq = _extrairDataViaModelo(textoParaIA, "Groq", chamarGroq);
+  registarVoto(dataGroq, "Groq");
+
+  // --- FONTE 4: IA Gemini 2.0 Flash ---
+  var dataGeminiPro = _extrairDataViaModelo(textoParaIA, "Gemini 2.0 Flash", function(p) { return chamarGemini(p, "gemini-2.0-flash"); });
+  registarVoto(dataGeminiPro, "Gemini 2.0 Flash");
+
+  // --- FONTE 5: IA Gemini 3.1 Flash Lite ---
+  var dataGeminiLite = _extrairDataViaModelo(textoParaIA, "Gemini 3.1 Flash Lite", function(p) { return chamarGemini(p, "gemini-3.1-flash-lite-preview"); });
+  registarVoto(dataGeminiLite, "Gemini Lite");
+
+  // --- FONTE 6: Nome do ficheiro (voto parcial — só MM/YYYY) ---
+  var nomeInfo = _extrairDataDoNomeFicheiro(fileName);
+  if (nomeInfo) {
+    // Procura entre as datas já votadas qual tem o mês/ano que bate
+    var votouPorNome = false;
+    for (var d in votos) {
+      var parts = d.split("/");
+      if (parts[1] === nomeInfo.month && parts[2] === nomeInfo.year) {
+        registarVoto(d, "Nome");
+        votouPorNome = true;
+        break;
+      }
+    }
+    if (!votouPorNome) {
+      Logger.log("  [CONSENSO] Nome: " + nomeInfo.month + "/" + nomeInfo.year + " (sem match de dia)");
+    }
+  } else {
+    Logger.log("  [CONSENSO] Nome: formato não reconhecido");
+  }
+
+  // --- APURAMENTO: data com mais votos ---
+  var melhorData = null;
+  var melhorVotos = 0;
+  for (var d in votos) {
+    if (votos[d] > melhorVotos) {
+      melhorVotos = votos[d];
+      melhorData = d;
+    }
+  }
+
+  if (melhorData) {
+    Logger.log("🗳️ [CONSENSO] RESULTADO: " + melhorData + " (" + melhorVotos + "/6 votos: " + fontes[melhorData].join(", ") + ")");
+  } else {
+    Logger.log("🗳️ [CONSENSO] RESULTADO: SEM DATA (nenhuma fonte devolveu data válida)");
+  }
+
+  return {
+    data: melhorData,
+    votos: melhorVotos,
+    fontes: melhorData ? fontes[melhorData] : [],
+    todas: votos
+  };
 }
 
 /**
@@ -751,7 +824,8 @@ function _computeFileHash(file) {
 
 /**
  * Verifica se um ficheiro já existe (duplicado) nas pastas indicadas.
- * Compara por tamanho primeiro (rápido) e só calcula hash se tamanho coincidir.
+ * Lista ficheiros via Drive API v2 (paginado), filtra por tamanho em código,
+ * e só calcula hash MD5 se o tamanho coincidir.
  */
 function _verificarDuplicados(file, pastasParaVerificar) {
   var tamanhoNovo = file.getSize();
@@ -760,17 +834,34 @@ function _verificarDuplicados(file, pastasParaVerificar) {
   for (var p = 0; p < pastasParaVerificar.length; p++) {
     var pasta = pastasParaVerificar[p];
     if (!pasta) continue;
-    var existentes = pasta.getFiles();
-    while (existentes.hasNext()) {
-      var existente = existentes.next();
-      if (existente.getSize() !== tamanhoNovo) continue;
-      // Mesmo tamanho → calcular hash para confirmar
-      if (!hashNovo) hashNovo = _computeFileHash(file);
-      if (_computeFileHash(existente) === hashNovo) {
-        Logger.log("DUPLICADO: " + file.getName() + " = " + existente.getName());
-        return true;
+    var folderId = pasta.getId();
+
+    var q = "'" + folderId + "' in parents and trashed=false";
+    var pageToken = null;
+
+    do {
+      var resp = Drive.Files.list({
+        q: q,
+        pageToken: pageToken,
+        maxResults: 200,
+        fields: "nextPageToken,items(id,title,fileSize)"
+      });
+
+      var items = resp.items || [];
+      for (var i = 0; i < items.length; i++) {
+        // Filtrar por tamanho em código (Drive API v2 não suporta fileSize na query)
+        if (Number(items[i].fileSize) !== tamanhoNovo) continue;
+        // Mesmo tamanho → calcular hash para confirmar
+        if (!hashNovo) hashNovo = _computeFileHash(file);
+        var existente = DriveApp.getFileById(items[i].id);
+        if (_computeFileHash(existente) === hashNovo) {
+          Logger.log("DUPLICADO: " + file.getName() + " = " + items[i].title + " (em " + pasta.getName() + ")");
+          return true;
+        }
       }
-    }
+
+      pageToken = resp.nextPageToken || null;
+    } while (pageToken);
   }
   return false;
 }
@@ -803,24 +894,35 @@ function _extrairMesAno(dataStr) {
   }
 }
 
-// Encontra a pasta do ano (com cache simples se quiseres evoluir)
+// Encontra a pasta do ano (com cache em memória)
 function getPastaAno_(year) {
+  var key = year.toString();
+  if (key in __cachePastaAno) return __cachePastaAno[key];
   var pastasFaturas = DriveApp.getFolderById(PASTA_GERAL_FATURAS).getFolders();
   while (pastasFaturas.hasNext()) {
     var p = pastasFaturas.next();
-    if (p.getName() === year.toString()) return p;
+    if (p.getName() === key) {
+      __cachePastaAno[key] = p;
+      return p;
+    }
   }
+  __cachePastaAno[key] = null;
   return null;
 }
 
-// Encontra a pasta do mês dentro da pasta do ano
+// Encontra a pasta do mês dentro da pasta do ano (com cache em memória)
 function getPastaMes_(pastaAno, month, year) {
-  var pastasMes = pastaAno.getFolders();
   var nomeAlvo = "Faturas_" + CODIGO_EMPRESA + "_" + month + "/" + year;
+  if (nomeAlvo in __cachePastaMes) return __cachePastaMes[nomeAlvo];
+  var pastasMes = pastaAno.getFolders();
   while (pastasMes.hasNext()) {
     var p = pastasMes.next();
-    if (p.getName() === nomeAlvo) return p;
+    if (p.getName() === nomeAlvo) {
+      __cachePastaMes[nomeAlvo] = p;
+      return p;
+    }
   }
+  __cachePastaMes[nomeAlvo] = null;
   return null;
 }
 
