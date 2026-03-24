@@ -1533,26 +1533,107 @@ function procurarFaturaPorATCUDNoArquivo(atcud, anoPagamento) {
   return null;
 }
 
+// Sheet de fornecedores (tem IBAN, NIF, nome)
+const SHEET_FORNECEDORES_ID = "1iUQQIGUJaTSDZn0MF9H3Kc7GREuWhGTycloovo9P3xc";
+var __cacheFornecedoresIBAN = null;
+
 /**
- * Fallback para comprovativos sem ATCUD: procura fatura por valor + entidade.
- * Percorre Sheets dos últimos 6 meses.
+ * Carrega cache IBAN → { nome, nif } da sheet de fornecedores.
+ * IBANs normalizados (sem pontos, espaços, traços).
+ */
+function getFornecedoresPorIBAN_() {
+  if (__cacheFornecedoresIBAN) return __cacheFornecedoresIBAN;
+  __cacheFornecedoresIBAN = {};
+  try {
+    var ss = SpreadsheetApp.openById(SHEET_FORNECEDORES_ID);
+    var sheet = ss.getSheets()[0];
+    var lastRow = sheet.getLastRow();
+    if (lastRow <= 2) return __cacheFornecedoresIBAN;
+
+    var colFornecedor = encontraColunaNoCabecalho(sheet, "Fornecedor", 2);
+    var colIBAN = encontraColunaNoCabecalho(sheet, "IBAN", 2);
+    var colNIF = encontraColunaNoCabecalho(sheet, "NIF/NIPC fornecedor", 2);
+    if (colFornecedor < 0 || colIBAN < 0 || colNIF < 0) {
+      Logger.log("⚠️ Sheet fornecedores: colunas não encontradas (Fornecedor=" + colFornecedor + " IBAN=" + colIBAN + " NIF=" + colNIF + ")");
+      return __cacheFornecedoresIBAN;
+    }
+
+    var dados = sheet.getRange(3, 1, lastRow - 2, sheet.getLastColumn()).getValues();
+    for (var i = 0; i < dados.length; i++) {
+      var ibanRaw = String(dados[i][colIBAN - 1] || "");
+      var nome = String(dados[i][colFornecedor - 1] || "").trim();
+      var nif = String(dados[i][colNIF - 1] || "").replace(/\s/g, "").trim();
+      if (!nome || nome.length <= 1 || !nif) continue;
+      // Pode ter vários IBANs separados por vírgula, newline, ou ponto-e-vírgula
+      var ibans = ibanRaw.split(/[,;\n\r]+/);
+      for (var j = 0; j < ibans.length; j++) {
+        var iban = ibans[j].replace(/[\s.\-]/g, "").toUpperCase();
+        if (iban.length >= 15) {
+          __cacheFornecedoresIBAN[iban] = { nome: nome, nif: nif };
+        }
+      }
+    }
+    Logger.log("📋 Cache fornecedores: " + Object.keys(__cacheFornecedoresIBAN).length + " IBANs carregados");
+  } catch (e) {
+    Logger.log("❌ Erro ao carregar sheet fornecedores: " + e.message);
+  }
+  return __cacheFornecedoresIBAN;
+}
+
+/**
+ * Extrair IBAN do texto do comprovativo. Normaliza removendo pontos/espaços.
+ */
+function extrairIBANDoTexto_(texto) {
+  if (!texto) return null;
+  // Padrão: PT50 seguido de dígitos com possíveis pontos/espaços
+  var match = texto.match(/PT\s*50[\s.\d]+/i);
+  if (!match) return null;
+  // Normalizar: remover pontos e espaços, ficar só com dígitos
+  var iban = match[0].replace(/[\s.\-]/g, "").toUpperCase();
+  // IBAN português = exactamente 25 chars (PT50 + 21 dígitos)
+  if (iban.length >= 25) iban = iban.substring(0, 25);
+  if (iban.length !== 25) return null;
+  return iban;
+}
+
+/**
+ * Fallback para comprovativos sem ATCUD:
+ * 1. Extrair IBAN → resolver fornecedor via sheet de fornecedores
+ * 2. Procurar faturas desse fornecedor nos últimos 12 meses
+ * 3. Match por valor
  */
 function procurarFaturaPorValorEntidade_(textoPdf, anoPagamento) {
   if (!textoPdf) return null;
   var textoLower = textoPdf.toLowerCase();
 
-  var yearWrappers = getYearFolders();
-  if (!yearWrappers || !yearWrappers.length) return null;
+  // PASSO 1: Extrair IBAN → resolver NIF + nome do fornecedor
+  var ibanComprovativo = extrairIBANDoTexto_(textoPdf);
+  var fornecedorInfo = null; // { nome, nif }
+  if (ibanComprovativo) {
+    Logger.log("     🏦 IBAN extraído: " + ibanComprovativo);
+    var cache = getFornecedoresPorIBAN_();
+    fornecedorInfo = cache[ibanComprovativo] || null;
+    if (fornecedorInfo) {
+      Logger.log("     ✅ Fornecedor via IBAN: " + fornecedorInfo.nome + " (NIF: " + fornecedorInfo.nif + ")");
+    } else {
+      Logger.log("     ⚠️ IBAN não encontrado na sheet de fornecedores");
+    }
+  } else {
+    Logger.log("     ⚠️ Sem IBAN no comprovativo");
+  }
 
-  // Percorrer últimos 6 meses
+  // Extrair descritivo/complementar (pode conter nº fatura)
+  var descritivoMatch = textoPdf.match(/(?:Descritivo|Complementar|Informação\s*Complementar)[:\s]*([^\n]{2,40})/i);
+  var descritivo = descritivoMatch ? descritivoMatch[1].trim() : "";
+  if (descritivo) Logger.log("     📎 Descritivo: " + descritivo);
+
+  // PASSO 2: Percorrer faturas dos últimos 12 meses
   var agora = new Date();
   var mesAtual = agora.getMonth() + 1;
   var anoAtual = anoPagamento || agora.getFullYear();
 
-  // Extrair o descritivo/complementar do comprovativo (frequentemente contém nº fatura)
-  var descritivoMatch = textoPdf.match(/(?:Descritivo|Complementar|Informação\s*Complementar)[:\s]*([^\n]{2,40})/i);
-  var descritivo = descritivoMatch ? descritivoMatch[1].trim() : "";
-  if (descritivo) Logger.log("     Descritivo/Complementar: " + descritivo);
+  // NIF do fornecedor (para match exacto na Sheet de faturas)
+  var nifFornecedor = fornecedorInfo ? fornecedorInfo.nif : "";
 
   for (var offset = 0; offset < 12; offset++) {
     var d = new Date(anoAtual, mesAtual - 1 - offset, 1);
@@ -1584,13 +1665,36 @@ function procurarFaturaPorValorEntidade_(textoPdf, anoPagamento) {
         var colNumDoc = encontraColunaNoCabecalho(sheet, "Nº", 2);
         if (colNumDoc < 0) colNumDoc = encontraColunaNoCabecalho(sheet, "Número do documento", 2);
         var colComp = encontraColunaNoCabecalho(sheet, "Comprovativo de pagamento", 2);
+        var colNifFatura = encontraColunaNoCabecalho(sheet, "NIF/NIPC fornecedor", 2);
+        if (colNifFatura < 0) colNifFatura = encontraColunaNoCabecalho(sheet, "NIF/NIPC", 2);
+        if (colNifFatura < 0) colNifFatura = encontraColunaNoCabecalho(sheet, "NIF", 2);
+        if (colNifFatura < 0) colNifFatura = encontraColunaNoCabecalho(sheet, "NIF fornecedor", 2);
 
         if (colValor < 0 || colEntidade < 0) continue;
 
-        var dados = sheet.getRange(3, 1, lastRow - 2, sheet.getLastColumn()).getValues();
+        if (nifFornecedor && colNifFatura < 0) {
+          Logger.log("     ⚠️ " + checkMonth + "/" + checkYear + " aba '" + abas[k] + "': coluna NIF não encontrada");
+        }
+
+        var numRows = lastRow - 2;
+        if (numRows <= 0) continue;
+        var dados = sheet.getRange(3, 1, numRows, sheet.getLastColumn()).getValues();
+        if (!dados || !dados.length) continue;
 
         for (var r = 0; r < dados.length; r++) {
           var rowData = dados[r];
+          if (!rowData) continue;
+          var entidadeExcel = String(rowData[colEntidade - 1] || "").trim();
+
+          // Se temos NIF via IBAN, filtrar só faturas desse fornecedor por NIF exacto
+          if (nifFornecedor) {
+            if (colNifFatura < 0) continue;
+            var nifFaturaRaw = rowData[colNifFatura - 1];
+            var nifFatura = String(nifFaturaRaw || "").replace(/\s/g, "").trim();
+            // Se veio como número, converter sem notação científica
+            if (typeof nifFaturaRaw === "number") nifFatura = nifFaturaRaw.toFixed(0);
+            if (nifFatura !== nifFornecedor) continue;
+          }
 
           // Verificar valor (formato flexível)
           var valorExcel = rowData[colValor - 1];
@@ -1618,41 +1722,39 @@ function procurarFaturaPorValorEntidade_(textoPdf, anoPagamento) {
 
           if (!valorMatch) continue;
 
-          // Verificar entidade (tudo em minúsculas)
-          var entidadeExcel = String(rowData[colEntidade - 1] || "").toLowerCase().trim();
-          if (entidadeExcel.length <= 2) continue;
-
-          var primeiraPalavra = entidadeExcel.split(/\s+/)[0];
-          if (primeiraPalavra.length <= 2) {
-            // Se primeira palavra é muito curta (ex: "A"), usar as primeiras duas
-            var palavras = entidadeExcel.split(/\s+/);
-            primeiraPalavra = palavras.slice(0, 2).join(" ");
-          }
-
-          // Comparar sem acentos
-          var textoSemAcentos = textoLower.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-          var entidadeSemAcentos = primeiraPalavra.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-
-          var entidadeEncontrada = textoLower.includes(primeiraPalavra) || textoSemAcentos.includes(entidadeSemAcentos);
-
-          // Se entidade não bate, tentar match por descritivo + nº documento
-          var descritivoMatch2 = false;
-          if (!entidadeEncontrada && descritivo && colNumDoc > 0) {
-            var numDocSheet = String(rowData[colNumDoc - 1]).trim();
-            if (numDocSheet.length >= 2 && descritivo.includes(numDocSheet)) {
-              descritivoMatch2 = true;
-              Logger.log("     📎 Descritivo '" + descritivo + "' contém nº doc '" + numDocSheet + "'");
+          // Se não temos NIF via IBAN, fallback: match por nome no texto + descritivo
+          if (!nifFornecedor) {
+            var entLower = entidadeExcel.toLowerCase();
+            var primeiraPalavra = entLower.split(/\s+/)[0];
+            if (primeiraPalavra.length <= 2) {
+              var palavras2 = entLower.split(/\s+/);
+              primeiraPalavra = palavras2.slice(0, 2).join(" ");
             }
-          }
+            var textoSemAcentos = textoLower.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+            var entSemAcentos = primeiraPalavra.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
-          if (!entidadeEncontrada && !descritivoMatch2) {
-            Logger.log("     ⚠️ Valor " + valorFloat + " bateu, mas entidade '" + primeiraPalavra + "' não encontrada no texto");
-            continue;
+            var entEncontrada = textoLower.includes(primeiraPalavra) || textoSemAcentos.includes(entSemAcentos);
+
+            // Fallback: descritivo contém nº doc
+            var descMatch = false;
+            if (!entEncontrada && descritivo && colNumDoc > 0) {
+              var numDocSheet = String(rowData[colNumDoc - 1]).trim();
+              if (numDocSheet.length >= 2 && descritivo.includes(numDocSheet)) {
+                descMatch = true;
+                Logger.log("     📎 Descritivo contém nº doc '" + numDocSheet + "'");
+              }
+            }
+
+            if (!entEncontrada && !descMatch) {
+              Logger.log("     ⚠️ Valor " + valorFloat + " bateu, mas entidade '" + primeiraPalavra + "' não encontrada");
+              continue;
+            }
           }
 
           // Match confirmado!
           var numDoc = colNumDoc > 0 ? String(rowData[colNumDoc - 1]) : "?";
-          Logger.log("   -> Match: " + checkMonth + "/" + checkYear + " | Entidade: " + entidadeExcel + " | Valor: " + valorFloat + " | Doc: " + numDoc);
+          var metodo = nifFornecedor ? "IBAN→NIF→Valor" : "Nome+Valor";
+          Logger.log("   ✅ Match (" + metodo + "): " + checkMonth + "/" + checkYear + " | " + entidadeExcel + " | Valor: " + valorFloat + " | Doc: " + numDoc);
 
           return {
             ano: checkYear,
@@ -1661,17 +1763,17 @@ function procurarFaturaPorValorEntidade_(textoPdf, anoPagamento) {
             pastaMesNome: pMes.getName(),
             numeroDocumento: numDoc,
             colComp: colComp,
-            row: r + 3, // 1-indexed, data starts at row 3
+            row: r + 3,
             aba: abas[k],
           };
         }
       }
     } catch (e) {
-      Logger.log("❌ Erro ao ler excel " + checkMonth + "/" + checkYear + " (valor+entidade): " + e.message);
+      Logger.log("❌ Erro ao ler excel " + checkMonth + "/" + checkYear + ": " + e.message);
     }
   }
 
-  Logger.log("🏁 Sem match valor+entidade nos últimos 6 meses.");
+  Logger.log("🏁 Sem match nos últimos 12 meses." + (fornecedorInfo ? " (Fornecedor: " + fornecedorInfo.nome + ", NIF: " + fornecedorInfo.nif + ")" : ""));
   return null;
 }
 
