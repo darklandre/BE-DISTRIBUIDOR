@@ -747,10 +747,10 @@ function classificarDocumentoViaIA(texto) {
 {"tipo":"...","data":"DD/MM/AAAA","fornecedor":"...","nif":"...","valor":"..."}
 
 Tipos possíveis (escolhe UM):
-- fatura = fatura, factura, invoice, fatura-recibo, fatura simplificada
+- fatura = fatura, factura, invoice, fatura-recibo, factura/recibo (FR), fatura simplificada, comissões bancárias, débitos de serviços. ATENÇÃO: "Válido como recibo após boa cobrança" NÃO torna o documento num recibo — continua a ser fatura.
 - nota_credito = nota de crédito, credit note
-- recibo = recibo de pagamento, receipt (NÃO recibo de vencimento/salário)
-- recibo_vencimento = recibo de salário, payslip
+- recibo = recibo de pagamento, receipt, quitação. Documento que CONFIRMA o pagamento de uma fatura já emitida. NÃO é recibo de vencimento/salário.
+- recibo_vencimento = recibo de salário, payslip, vencimento
 - extrato = extrato bancário, conta-corrente, extracto
 - comprovativo = comprovativo de transferência/pagamento bancário
 - lixo = avisos, notificações, publicidade, documentos sem valor fiscal
@@ -1410,12 +1410,25 @@ function catalogarComprovativosArquivo() {
     try {
       var texto = convertPDFToText(file.getId(), ['pt', 'en', null]);
       var atcud = extractATCUDFromText(texto);
-      if (!atcud) { Logger.log("Sem ATCUD: " + file.getName()); continue; }
 
       var dataPagamentoStr = extractDateFromPayslip(texto);
       var anoPagamento = inferYearFromDateString(dataPagamentoStr) || new Date().getFullYear();
 
-      var match = procurarFaturaPorATCUDNoArquivo(atcud, anoPagamento);
+      // Tentar match por ATCUD primeiro, fallback para valor+entidade
+      var match = null;
+      if (atcud) {
+        match = procurarFaturaPorATCUDNoArquivo(atcud, anoPagamento);
+        if (match) Logger.log("✅ Comprovativo match por ATCUD: " + atcud);
+      }
+      if (!match) {
+        Logger.log("⚡ Sem ATCUD ou sem match ATCUD para " + file.getName() + " → fallback valor+entidade");
+        Logger.log("   Texto (500 chars): " + (texto || "").substring(0, 500).replace(/\n/g, " "));
+        // Extrair todos os valores monetários do texto para debug
+        var valoresNoTexto = (texto || "").match(/\d[\d\s.,]*\d/g) || [];
+        Logger.log("   Valores no texto: " + valoresNoTexto.slice(0, 15).join(" | "));
+        match = procurarFaturaPorValorEntidade_(texto, anoPagamento);
+        if (match) Logger.log("✅ Comprovativo match por VALOR+ENTIDADE: " + match.numeroDocumento);
+      }
 
       if (match) {
         var novoNome = "COMP" + match.numeroDocumento + ".pdf";
@@ -1517,6 +1530,148 @@ function procurarFaturaPorATCUDNoArquivo(atcud, anoPagamento) {
       }
     }
   }
+  return null;
+}
+
+/**
+ * Fallback para comprovativos sem ATCUD: procura fatura por valor + entidade.
+ * Percorre Sheets dos últimos 6 meses.
+ */
+function procurarFaturaPorValorEntidade_(textoPdf, anoPagamento) {
+  if (!textoPdf) return null;
+  var textoLower = textoPdf.toLowerCase();
+
+  var yearWrappers = getYearFolders();
+  if (!yearWrappers || !yearWrappers.length) return null;
+
+  // Percorrer últimos 6 meses
+  var agora = new Date();
+  var mesAtual = agora.getMonth() + 1;
+  var anoAtual = anoPagamento || agora.getFullYear();
+
+  // Extrair o descritivo/complementar do comprovativo (frequentemente contém nº fatura)
+  var descritivoMatch = textoPdf.match(/(?:Descritivo|Complementar|Informação\s*Complementar)[:\s]*([^\n]{2,40})/i);
+  var descritivo = descritivoMatch ? descritivoMatch[1].trim() : "";
+  if (descritivo) Logger.log("     Descritivo/Complementar: " + descritivo);
+
+  for (var offset = 0; offset < 12; offset++) {
+    var d = new Date(anoAtual, mesAtual - 1 - offset, 1);
+    var checkYear = d.getFullYear();
+    var checkMonth = ("0" + (d.getMonth() + 1)).slice(-2);
+
+    var pAno = getPastaAno_(checkYear);
+    if (!pAno) continue;
+    var pMes = getPastaMes_(pAno, checkMonth, checkYear);
+    if (!pMes) continue;
+
+    var nomeFicheiroExcel = "#0 - Faturas_" + CODIGO_EMPRESA + "_" + checkMonth + "/" + checkYear;
+    var files = pMes.getFilesByName(nomeFicheiroExcel);
+    if (!files.hasNext()) continue;
+
+    try {
+      var fileExcel = files.next();
+      var ss = SpreadsheetApp.open(fileExcel);
+      var abas = ["Faturas e NCs normais", "Faturas e NCs com reembolso", "Outros documentos"];
+
+      for (var k = 0; k < abas.length; k++) {
+        var sheet = ss.getSheetByName(abas[k]);
+        if (!sheet) continue;
+        var lastRow = sheet.getLastRow();
+        if (lastRow <= 2) continue;
+
+        var colEntidade = encontraColunaNoCabecalho(sheet, "Fornecedor", 2);
+        var colValor = encontraColunaNoCabecalho(sheet, "Valor total", 2);
+        var colNumDoc = encontraColunaNoCabecalho(sheet, "Nº", 2);
+        if (colNumDoc < 0) colNumDoc = encontraColunaNoCabecalho(sheet, "Número do documento", 2);
+        var colComp = encontraColunaNoCabecalho(sheet, "Comprovativo de pagamento", 2);
+
+        if (colValor < 0 || colEntidade < 0) continue;
+
+        var dados = sheet.getRange(3, 1, lastRow - 2, sheet.getLastColumn()).getValues();
+
+        for (var r = 0; r < dados.length; r++) {
+          var rowData = dados[r];
+
+          // Verificar valor (formato flexível)
+          var valorExcel = rowData[colValor - 1];
+          var valorFloat = null;
+          if (typeof valorExcel === 'number') {
+            valorFloat = valorExcel;
+          } else if (typeof valorExcel === 'string') {
+            var limpo = valorExcel.replace(/[^0-9.,-]/g, "").replace(",", ".");
+            valorFloat = parseFloat(limpo);
+          }
+
+          var valorMatch = false;
+          if (valorFloat !== null && !isNaN(valorFloat) && valorFloat > 0) {
+            var vRaw = valorFloat.toFixed(2);
+            var vVirgula = vRaw.replace(".", ",");
+            var partes = vVirgula.split(",");
+            var vComEspaco = partes[0].replace(/\B(?=(\d{3})+(?!\d))/g, " ") + "," + partes[1];
+            var vComPonto = partes[0].replace(/\B(?=(\d{3})+(?!\d))/g, ".") + "," + partes[1];
+
+            if (textoPdf.includes(vRaw) || textoPdf.includes(vVirgula) ||
+                textoPdf.includes(vComEspaco) || textoPdf.includes(vComPonto)) {
+              valorMatch = true;
+            }
+          }
+
+          if (!valorMatch) continue;
+
+          // Verificar entidade (tudo em minúsculas)
+          var entidadeExcel = String(rowData[colEntidade - 1] || "").toLowerCase().trim();
+          if (entidadeExcel.length <= 2) continue;
+
+          var primeiraPalavra = entidadeExcel.split(/\s+/)[0];
+          if (primeiraPalavra.length <= 2) {
+            // Se primeira palavra é muito curta (ex: "A"), usar as primeiras duas
+            var palavras = entidadeExcel.split(/\s+/);
+            primeiraPalavra = palavras.slice(0, 2).join(" ");
+          }
+
+          // Comparar sem acentos
+          var textoSemAcentos = textoLower.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+          var entidadeSemAcentos = primeiraPalavra.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+
+          var entidadeEncontrada = textoLower.includes(primeiraPalavra) || textoSemAcentos.includes(entidadeSemAcentos);
+
+          // Se entidade não bate, tentar match por descritivo + nº documento
+          var descritivoMatch2 = false;
+          if (!entidadeEncontrada && descritivo && colNumDoc > 0) {
+            var numDocSheet = String(rowData[colNumDoc - 1]).trim();
+            if (numDocSheet.length >= 2 && descritivo.includes(numDocSheet)) {
+              descritivoMatch2 = true;
+              Logger.log("     📎 Descritivo '" + descritivo + "' contém nº doc '" + numDocSheet + "'");
+            }
+          }
+
+          if (!entidadeEncontrada && !descritivoMatch2) {
+            Logger.log("     ⚠️ Valor " + valorFloat + " bateu, mas entidade '" + primeiraPalavra + "' não encontrada no texto");
+            continue;
+          }
+
+          // Match confirmado!
+          var numDoc = colNumDoc > 0 ? String(rowData[colNumDoc - 1]) : "?";
+          Logger.log("   -> Match: " + checkMonth + "/" + checkYear + " | Entidade: " + entidadeExcel + " | Valor: " + valorFloat + " | Doc: " + numDoc);
+
+          return {
+            ano: checkYear,
+            spreadsheetId: fileExcel.getId(),
+            spreadsheetName: fileExcel.getName(),
+            pastaMesNome: pMes.getName(),
+            numeroDocumento: numDoc,
+            colComp: colComp,
+            row: r + 3, // 1-indexed, data starts at row 3
+            aba: abas[k],
+          };
+        }
+      }
+    } catch (e) {
+      Logger.log("❌ Erro ao ler excel " + checkMonth + "/" + checkYear + " (valor+entidade): " + e.message);
+    }
+  }
+
+  Logger.log("🏁 Sem match valor+entidade nos últimos 6 meses.");
   return null;
 }
 
@@ -1638,10 +1793,83 @@ function _encontrarMesOrigemDaFatura(textoPdf, anoRecibo, mesRecibo) {
          Logger.log("     Aba '" + abas[k] + "' Cols: Ent=" + colEntidade + " Val=" + colValor + " Num=" + colNum + " ATCUD=" + colATCUD);
 
         if (colValor < 0 && colNum < 0 && colATCUD < 0) continue;
-        
+
         // Ler dados em memória
         var dados = sheet.getRange(3, 1, lastRow-2, sheet.getLastColumn()).getValues();
-        
+
+        // === NÍVEL 0: Extrair nºs de fatura do texto do recibo e procurar na coluna ATCUD ===
+        // Recibos frequentemente listam as faturas que pagam (ex: "Fatura 1 2600/000077")
+        // Extrair os sequenciais dessas referências e procurar na coluna ATCUD
+        if (colATCUD > 0) {
+          var seqsRecibo = new Set();
+
+          // Padrão 1: "XXXX/NNNNNN" (série/número) — extrair só a parte após a barra
+          // Exclui anos isolados (2024/, 2025/, 2026/) que não são nºs de fatura
+          var refsBarras = textoPdf.match(/\b\d{1,4}\/0*(\d{2,})\b/g) || [];
+          for (var q = 0; q < refsBarras.length; q++) {
+            var partesBarra = refsBarras[q].split("/");
+            var serie = partesBarra[0];
+            var seqRef = partesBarra[1].replace(/^0+/, "") || "0";
+            // Excluir se a série é um ano (2020-2030) e o sequencial parece data (mês/dia)
+            var serieNum = parseInt(serie);
+            if (serieNum >= 2020 && serieNum <= 2030) continue;
+            if (seqRef.length >= 2) seqsRecibo.add(seqRef);
+          }
+
+          // Padrão 2: Tabela de documentos no recibo — "Fatura" ou "Nota de Crédito" seguido de nº
+          // Captura: "Fatura1 2600/000077" → "000077" → "77"
+          var refsTabela = textoPdf.match(/(?:Fatura|Factura|Nota de [Cc]rédito)\s*\d*\s+\d{1,4}\/0*(\d{2,})/g) || [];
+          for (var q2 = 0; q2 < refsTabela.length; q2++) {
+            var numTabela = refsTabela[q2].match(/\/0*(\d{2,})/);
+            if (numTabela) seqsRecibo.add(numTabela[1].replace(/^0+/, "") || "0");
+          }
+
+          // Padrão 3: "Nº Documento" seguido de nº com barra (contexto de tabela de recibo)
+          var refsNDoc = textoPdf.match(/N[º°]\s*Documento[^\n]{0,30}?\d{1,4}\/0*(\d{2,})/gi) || [];
+          for (var q3 = 0; q3 < refsNDoc.length; q3++) {
+            var numNDoc = refsNDoc[q3].match(/\/0*(\d{2,})/);
+            if (numNDoc) seqsRecibo.add(numNDoc[1].replace(/^0+/, "") || "0");
+          }
+
+          if (seqsRecibo.size > 0) {
+            Logger.log("     [NÍVEL 0] Referências a faturas encontradas no recibo: " + Array.from(seqsRecibo).join(", "));
+
+            for (var r0 = 0; r0 < dados.length; r0++) {
+              var atcudExcel = String(dados[r0][colATCUD-1]).toUpperCase().trim();
+              if (!atcudExcel || atcudExcel.length < 3) continue;
+
+              // Extrair sequencial do ATCUD (parte após último "-" ou últimos dígitos)
+              var atcudSeq = atcudExcel.replace(/.*[-]0*/, "");
+
+              var encontrouRef = false;
+              var seqArr = Array.from(seqsRecibo);
+              for (var sq = 0; sq < seqArr.length; sq++) {
+                if (atcudSeq === seqArr[sq] || atcudExcel.includes(seqArr[sq])) {
+                  encontrouRef = true;
+                  break;
+                }
+              }
+
+              if (encontrouRef) {
+                // Confirmar com valor
+                var valExcel0 = dados[r0][colValor-1];
+                var valFloat0 = typeof valExcel0 === 'number' ? valExcel0 : parseFloat(String(valExcel0).replace(/[^0-9.,-]/g, "").replace(",", "."));
+
+                if (valFloat0 && !isNaN(valFloat0)) {
+                  var v0 = valFloat0.toFixed(2);
+                  var v0v = v0.replace(".", ",");
+                  if (textoPdf.includes(v0) || textoPdf.includes(v0v)) {
+                    Logger.log("✅ SMART MATCH NÍVEL 0 (Ref. fatura no recibo + ATCUD + Valor)");
+                    Logger.log("   -> Destino: " + checkMonth + "/" + checkYear);
+                    Logger.log("   -> ATCUD: " + atcudExcel + " | Valor: " + valExcel0);
+                    return { year: String(checkYear), month: String(checkMonth) };
+                  }
+                }
+              }
+            }
+          }
+        }
+
         for (var r = 0; r < dados.length; r++) {
           var rowData = dados[r];
           
@@ -1699,45 +1927,86 @@ function _encontrarMesOrigemDaFatura(textoPdf, anoRecibo, mesRecibo) {
             }
           }
 
-          // === PASSO 3: VERIFICAR ID PARCIAL ===
-          var idMatch = false;
+          // === PASSO 3: VERIFICAR ID (3 níveis de confiança) ===
           var idEncontrado = "";
+          var nivelMatch = 0; // 0=nenhum, 1=nº completo, 2=ATCUD completo, 3=sequencial longo+valor+entidade
 
-          // Tenta pelo Nº Fatura
+          // NÍVEL 1: Número COMPLETO da fatura no texto (ex: "FT 2026/13", "FT A/13")
           if (colNum > 0) {
              var numDoc = String(rowData[colNum-1]).toUpperCase().trim();
-             var sequencial = extractSequencial_(numDoc);
-             if (sequencial && sequencial.length >= 2) {
-               if (textoNorm.includes(sequencial)) {
-                 idMatch = true;
-                 idEncontrado = "Nº " + numDoc + " (Seq: " + sequencial + ")";
+             if (numDoc.length >= 3) {
+               // Normalizar espaços para match mais flexível
+               var numDocNorm = numDoc.replace(/\s+/g, " ");
+               var numDocSemEspacos = numDoc.replace(/\s+/g, "");
+               if (textoNorm.includes(numDocNorm) || textoNorm.includes(numDocSemEspacos)) {
+                 nivelMatch = 1;
+                 idEncontrado = "Nº COMPLETO " + numDoc;
                }
              }
           }
 
-          // Tenta pelo ATCUD
-          if (!idMatch && colATCUD > 0) {
+          // NÍVEL 2: ATCUD COMPLETO no texto (sempre único)
+          if (nivelMatch === 0 && colATCUD > 0) {
              var atcud = String(rowData[colATCUD-1]).toUpperCase().trim();
-             var seqAtcud = extractSequencial_(atcud);
-             if (seqAtcud && seqAtcud.length >= 2) {
-               if (textoNorm.includes(seqAtcud)) {
-                 idMatch = true;
-                 idEncontrado = "ATCUD " + atcud + " (Seq: " + seqAtcud + ")";
+             if (atcud.length >= 5) {
+               // ATCUD tem formato tipo "ABCD1234-5678" — procurar completo
+               var atcudNorm = atcud.replace(/\s+/g, "");
+               if (textoNorm.includes(atcud) || textoNorm.replace(/\s+/g, "").includes(atcudNorm)) {
+                 nivelMatch = 2;
+                 idEncontrado = "ATCUD COMPLETO " + atcud;
                }
+             }
+          }
+
+          // NÍVEL 3 (fallback): Sequencial LONGO (6+ dígitos) + valor + entidade (os 3 juntos)
+          if (nivelMatch === 0) {
+             var seqMatch = false;
+             var seqEncontrado = "";
+
+             if (colNum > 0) {
+               var numDoc3 = String(rowData[colNum-1]).toUpperCase().trim();
+               var sequencial = extractSequencial_(numDoc3);
+               if (sequencial && sequencial.length >= 6 && textoNorm.includes(sequencial)) {
+                 seqMatch = true;
+                 seqEncontrado = "Nº " + numDoc3 + " (Seq: " + sequencial + ")";
+               }
+             }
+             if (!seqMatch && colATCUD > 0) {
+               var atcud3 = String(rowData[colATCUD-1]).toUpperCase().trim();
+               var seqAtcud = extractSequencial_(atcud3);
+               if (seqAtcud && seqAtcud.length >= 6 && textoNorm.includes(seqAtcud)) {
+                 seqMatch = true;
+                 seqEncontrado = "ATCUD " + atcud3 + " (Seq: " + seqAtcud + ")";
+               }
+             }
+
+             // Nível 3 exige os 3: sequencial + valor + entidade
+             if (seqMatch && valorMatch && entidadeMatch) {
+               nivelMatch = 3;
+               idEncontrado = seqEncontrado + " + Valor + Entidade";
              }
           }
 
           // === DECISÃO FINAL ===
-          // Exige: Valor E (ID ou Entidade Forte)
-          // Mas na tua lógica pediste ID explicitamente.
-          if (valorMatch && idMatch) {
-            Logger.log("✅ SMART MATCH CONFIRMADO!");
-            Logger.log("   -> Ficheiro: " + checkMonth + "/" + checkYear);
-            Logger.log("   -> Valor: " + rowData[colValor-1]);
-            Logger.log("   -> ID Validado: " + idEncontrado);
+          // Nível 1 ou 2: match seguro (número ou ATCUD completo) — valor confirma
+          // Nível 3: fallback (sequencial longo + valor + entidade juntos)
+          if (nivelMatch === 1 && valorMatch) {
+            Logger.log("✅ SMART MATCH NÍVEL 1 (Nº completo + Valor)");
+            Logger.log("   -> Destino: " + checkMonth + "/" + checkYear);
+            Logger.log("   -> Valor: " + rowData[colValor-1] + " | ID: " + idEncontrado);
             return { year: String(checkYear), month: String(checkMonth) };
-          } else if (valorMatch && !idMatch) {
-            Logger.log("      ❌ Valor bateu, mas ID não encontrado no PDF. (Excel ID: " + (colNum>0?rowData[colNum-1]:"N/A") + ")");
+          } else if (nivelMatch === 2 && valorMatch) {
+            Logger.log("✅ SMART MATCH NÍVEL 2 (ATCUD completo + Valor)");
+            Logger.log("   -> Destino: " + checkMonth + "/" + checkYear);
+            Logger.log("   -> Valor: " + rowData[colValor-1] + " | ID: " + idEncontrado);
+            return { year: String(checkYear), month: String(checkMonth) };
+          } else if (nivelMatch === 3) {
+            Logger.log("✅ SMART MATCH NÍVEL 3 (Seq longo + Valor + Entidade)");
+            Logger.log("   -> Destino: " + checkMonth + "/" + checkYear);
+            Logger.log("   -> " + idEncontrado);
+            return { year: String(checkYear), month: String(checkMonth) };
+          } else if (valorMatch) {
+            Logger.log("      ⚠️ Valor bateu, mas ID insuficiente. (Excel: " + (colNum>0?rowData[colNum-1]:"N/A") + ", Entidade: " + (entidadeMatch?"SIM":"NÃO") + ")");
           }
         }
       }
