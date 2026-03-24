@@ -1652,6 +1652,7 @@ function procurarFaturaPorValorEntidade_(textoPdf, anoPagamento) {
     try {
       var fileExcel = files.next();
       var ss = SpreadsheetApp.open(fileExcel);
+      if (!ss) continue;
       var abas = ["Faturas e NCs normais", "Faturas e NCs com reembolso", "Outros documentos"];
 
       for (var k = 0; k < abas.length; k++) {
@@ -1659,6 +1660,8 @@ function procurarFaturaPorValorEntidade_(textoPdf, anoPagamento) {
         if (!sheet) continue;
         var lastRow = sheet.getLastRow();
         if (lastRow <= 2) continue;
+        var lastCol = sheet.getLastColumn();
+        if (lastCol <= 0) continue;
 
         var colEntidade = encontraColunaNoCabecalho(sheet, "Fornecedor", 2);
         var colValor = encontraColunaNoCabecalho(sheet, "Valor total", 2);
@@ -1677,8 +1680,15 @@ function procurarFaturaPorValorEntidade_(textoPdf, anoPagamento) {
         }
 
         var numRows = lastRow - 2;
-        if (numRows <= 0) continue;
-        var dados = sheet.getRange(3, 1, numRows, sheet.getLastColumn()).getValues();
+        var numCols = sheet.getLastColumn();
+        if (numRows <= 0 || numCols <= 0) continue;
+        var dados;
+        try {
+          dados = sheet.getRange(3, 1, numRows, numCols).getValues();
+        } catch (eRange) {
+          Logger.log("     ⚠️ Erro getRange " + checkMonth + "/" + checkYear + " aba '" + abas[k] + "': " + eRange.message);
+          continue;
+        }
         if (!dados || !dados.length) continue;
 
         for (var r = 0; r < dados.length; r++) {
@@ -1769,7 +1779,7 @@ function procurarFaturaPorValorEntidade_(textoPdf, anoPagamento) {
         }
       }
     } catch (e) {
-      Logger.log("❌ Erro ao ler excel " + checkMonth + "/" + checkYear + ": " + e.message);
+      Logger.log("❌ Erro ao ler excel " + checkMonth + "/" + checkYear + ": " + e.message + " | Stack: " + (e.stack || "").substring(0, 100));
     }
   }
 
