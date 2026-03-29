@@ -564,12 +564,12 @@ function chamarMistral(prompt) {
 function chamarGemini(prompt, modelo) {
   const API_KEY = PropertiesService.getScriptProperties().getProperty("GEMINI_API_KEY");
   if (!API_KEY) throw new Error("GEMINI_API_KEY não configurada");
-  var modelId = modelo || "gemini-2.0-flash";
+  var modelId = modelo || "gemini-2.5-flash";
   const url = "https://generativelanguage.googleapis.com/v1beta/models/" + modelId + ":generateContent?key=" + API_KEY;
 
   const payload = {
     contents: [{ parts: [{ text: prompt }] }],
-    generationConfig: { temperature: 0, maxOutputTokens: 100 }
+    generationConfig: { temperature: 0, maxOutputTokens: 2000, thinkingConfig: { thinkingBudget: 0 } }
   };
 
   const options = {
@@ -586,9 +586,13 @@ function chamarGemini(prompt, modelo) {
     throw new Error("Gemini: " + (json.error.message || JSON.stringify(json.error)));
   }
 
-  var text = "";
-  try { text = json.candidates[0].content.parts[0].text; } catch (e) {
+  var parts = [];
+  try { parts = json.candidates[0].content.parts || []; } catch (e) {
     throw new Error("Gemini resposta inesperada: " + JSON.stringify(json).substring(0, 200));
+  }
+  var text = "";
+  for (var i = 0; i < parts.length; i++) {
+    if (parts[i].text) text += parts[i].text;
   }
   return text;
 }
@@ -686,7 +690,7 @@ function _consensoData(fileName, textoPDF) {
   registarVoto(dataGroq, "Groq");
 
   // --- FONTE 4: IA Gemini 2.0 Flash ---
-  var dataGeminiPro = _extrairDataViaModelo(textoParaIA, "Gemini 2.0 Flash", function(p) { return chamarGemini(p, "gemini-2.0-flash"); });
+  var dataGeminiPro = _extrairDataViaModelo(textoParaIA, "Gemini 2.0 Flash", function(p) { return chamarGemini(p, "gemini-2.5-flash"); });
   registarVoto(dataGeminiPro, "Gemini 2.0 Flash");
 
   // --- FONTE 5: IA Gemini 3.1 Flash Lite ---
